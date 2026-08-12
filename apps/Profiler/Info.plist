@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Profiler</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Profiler reads live frames from the attached camera to measure laser beam profiles.</string>
+	<!-- Opening an ImageCaptureCore session enumerates the camera's memory card, which
+	     macOS classifies as a removable volume. There is no session option to skip that,
+	     so the prompt is unavoidable — this at least explains why it is being asked. -->
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Profiler opens a session with the attached camera. macOS treats the camera's memory card as a removable volume; the app reads live-view frames only and does not read or modify files on the card.</string>
+</dict>
+</plist>
