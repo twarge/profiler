@@ -37,8 +37,12 @@ final class SyntheticSource: FrameSource {
     var measurementChannel: MeasurementChannel = .green
 
     var truth = Truth()
-    /// Fraction of full scale the beam peak would reach at the reference ISO.
-    var referenceAmplitude = 0.02
+    /// Fraction of full scale the beam peak reaches at the reference ISO.
+    ///
+    /// Sits a little under the servo's 70% target, so the simulated beam is properly
+    /// exposed the moment it starts — visible without touching display gain — while the
+    /// auto-gain loop still has somewhere to move.
+    var referenceAmplitude = 0.55
     private let referenceISO = 800.0
 
     private let width = 1024
@@ -47,7 +51,6 @@ final class SyntheticSource: FrameSource {
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "synthetic.source")
     private var startTime = Date()
-    private var rngState: UInt64 = 0x2545_F491_4F6C_DD1D
 
     private let isoLadder: [Int] = [
         100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000,
@@ -124,17 +127,32 @@ final class SyntheticSource: FrameSource {
         onFrame?(frame)
     }
 
-    /// Box–Muller on a xorshift stream. Fast enough to run per pixel at 30 fps.
-    private func gaussianNoise() -> Double {
-        let u1 = max(1e-12, nextUniform())
-        let u2 = nextUniform()
-        return (-2 * log(u1)).squareRoot() * cos(2 * .pi * u2)
-    }
+    /// Precomputed normal deviates.
+    ///
+    /// Box–Muller per pixel costs a log, a sqrt and a cos — 700k times per frame, which
+    /// dominated the generator and starved the analyser. Drawing from a table with a
+    /// coprime stride visits every entry before repeating and is indistinguishable from
+    /// fresh deviates for a simulator.
+    private static let noiseTable: [Double] = {
+        var table = [Double](repeating: 0, count: 8192)
+        var s: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next() -> Double {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17
+            return Double(s >> 11) / Double(1 << 53)
+        }
+        for i in 0..<table.count {
+            let u1 = max(1e-12, next())
+            let u2 = next()
+            table[i] = (-2 * log(u1)).squareRoot() * cos(2 * .pi * u2)
+        }
+        return table
+    }()
 
-    private func nextUniform() -> Double {
-        rngState ^= rngState << 13
-        rngState ^= rngState >> 7
-        rngState ^= rngState << 17
-        return Double(rngState >> 11) / Double(1 << 53)
+    private var noiseCursor = 0
+
+    @inline(__always)
+    private func gaussianNoise() -> Double {
+        noiseCursor = (noiseCursor &+ 4099) & 8191
+        return Self.noiseTable[noiseCursor]
     }
 }

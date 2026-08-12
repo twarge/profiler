@@ -8,8 +8,10 @@
 
 .PHONY: all mac release test run clean
 
-APP_DEBUG = $(shell xcodebuild -project apps/Profiler.xcodeproj -scheme Profiler \
-	-configuration Debug -showBuildSettings 2>/dev/null \
+BUILT = xcodebuild -project apps/Profiler.xcodeproj -scheme Profiler -showBuildSettings
+APP_DEBUG = $(shell $(BUILT) -configuration Debug 2>/dev/null \
+	| awk -F' = ' '/ BUILT_PRODUCTS_DIR/ {print $$2}')/Profiler.app
+APP_RELEASE = $(shell $(BUILT) -configuration Release 2>/dev/null \
 	| awk -F' = ' '/ BUILT_PRODUCTS_DIR/ {print $$2}')/Profiler.app
 
 all: mac
@@ -32,8 +34,11 @@ release:
 test: mac
 	@"$(APP_DEBUG)/Contents/MacOS/Profiler" --self-test
 
-run: mac
-	@open "$(APP_DEBUG)"
+# Release, deliberately. The analyser is numeric code in a per-frame loop, and a
+# debug build is slow enough to drop most frames — which reads as the app being
+# broken rather than unoptimised. Use `make mac` when you want to debug.
+run: release
+	@open "$(APP_RELEASE)"
 
 clean:
 	rm -rf build

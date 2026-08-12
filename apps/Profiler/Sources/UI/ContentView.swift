@@ -39,7 +39,10 @@ struct ContentView: View {
             .help(model.isRunning ? "Stop capture" : "Start capture")
 
             Toggle(isOn: $model.frozen) {
-                Label("Freeze", systemImage: "snowflake")
+                Label(
+                    model.frozen ? "Resume" : "Pause",
+                    systemImage: model.frozen ? "play.fill" : "pause.fill"
+                )
             }
             .disabled(!model.isRunning)
             .help("Hold the current frame without stopping the source")
@@ -153,7 +156,7 @@ struct MeasurementView: View {
             Text(model.isRunning ? "Capturing" : "Idle")
                 .font(.caption)
             if model.frozen {
-                Label("Frozen", systemImage: "snowflake")
+                Label("Paused", systemImage: "pause.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
