@@ -28,7 +28,10 @@ struct ProfileChartView: View {
     var body: some View {
         Canvas { context, size in
             guard profile.count > 1 else { return }
-            let maxValue = amplitudeMax ?? (profile.max().map(Double.init) ?? 0)
+            // Converted with an explicit `Double(_:)` call rather than `.map(Double.init)`:
+            // the unapplied initialiser drags in every numeric overload, and this is the
+            // most expensive expression in the module for the type checker to solve.
+            let maxValue = amplitudeMax ?? Double(profile.max() ?? 0)
             guard maxValue > 0 else { return }
 
             let n = profile.count

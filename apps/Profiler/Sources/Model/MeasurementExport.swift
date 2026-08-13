@@ -171,6 +171,17 @@ struct ExportFile: Transferable {
         }
     }
 
+    /// The type this artifact transfers as, and the key the representations below are
+    /// selected by — so a content case cannot end up offering one extension under a
+    /// different transfer type.
+    var contentType: UTType {
+        switch content {
+        case .image: return .png
+        case .profiles, .profileX, .profileY: return .commaSeparatedText
+        case .metrics: return .json
+        }
+    }
+
     func data() throws -> Data {
         switch content {
         case .image: return try export.pngData()
@@ -181,23 +192,31 @@ struct ExportFile: Transferable {
         }
     }
 
+    /// One representation per exported type, each offered only for the contents that
+    /// carry it.
+    ///
+    /// Built through the helper below, with every closure's types spelled out. Written
+    /// as three inline `FileRepresentation`s with `$0` conditions instead, the builder's
+    /// ten `buildBlock` arities and the untyped closures leave Xcode 26.6's type checker
+    /// enough to explore that it gives up — "unable to type-check this expression in
+    /// reasonable time" — even though Xcode 27's still manages it. The CI runners are on
+    /// the former, so keep the annotations.
     static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .png) { file in
-            SentTransferredFile(try file.writeTemporary(), allowAccessingOriginalFile: false)
-        }
-        .exportingCondition { $0.content == .image }
+        fileRepresentation(.png)
+        fileRepresentation(.commaSeparatedText)
+        fileRepresentation(.json)
+    }
 
-        FileRepresentation(exportedContentType: .commaSeparatedText) { file in
+    private static func fileRepresentation(
+        _ type: UTType
+    ) -> some TransferRepresentation<ExportFile> {
+        let representation = FileRepresentation<ExportFile>(exportedContentType: type) {
+            (file: ExportFile) async throws -> SentTransferredFile in
             SentTransferredFile(try file.writeTemporary(), allowAccessingOriginalFile: false)
         }
-        .exportingCondition {
-            $0.content == .profiles || $0.content == .profileX || $0.content == .profileY
+        return representation.exportingCondition { (file: ExportFile) -> Bool in
+            file.contentType == type
         }
-
-        FileRepresentation(exportedContentType: .json) { file in
-            SentTransferredFile(try file.writeTemporary(), allowAccessingOriginalFile: false)
-        }
-        .exportingCondition { $0.content == .metrics }
     }
 
     /// File transfers hand over a URL, so the bytes go through a uniquely-named temporary

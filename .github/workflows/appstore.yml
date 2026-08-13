@@ -1,6 +1,7 @@
 name: App Store
 
-# Archives and uploads the app to App Store Connect (TestFlight / review).
+# Archives and uploads both the Mac and the iPad app to App Store Connect
+# (TestFlight / review).
 # Run it manually from the Actions tab, or push a version tag like v1.2.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
@@ -40,10 +41,27 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   upload:
-    name: Upload (macOS)
+    name: Upload (${{ matrix.name }})
     needs: build
     runs-on: macos-26
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # One platform at a time: parallel legs share the ASC key and race
+      # Apple's provisioning and upload services, which intermittently fails
+      # the slower leg with misleading errors ("Cloud signing permission
+      # error", "Account credentials have expired").
+      max-parallel: 1
+      matrix:
+        include:
+          - name: iOS
+            destination: generic/platform=iOS
+            archive: build/Profiler-iOS.xcarchive
+            asc_platform: IOS
+          - name: macOS
+            destination: generic/platform=macOS
+            archive: build/Profiler-macOS.xcarchive
+            asc_platform: MAC_OS
     steps:
       - uses: actions/checkout@v7
 
@@ -116,7 +134,7 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_BUNDLE_ID: com.twarge.profiler
-          ASC_PLATFORM: MAC_OS
+          ASC_PLATFORM: ${{ matrix.asc_platform }}
           TARGET_VERSION: ${{ steps.version.outputs.version }}
         run: |
           ASC_KEY_PATH=~/private_keys/AuthKey_"$ASC_KEY_ID".p8 \
@@ -152,8 +170,8 @@ jobs:
             -project apps/Profiler.xcodeproj \
             -scheme Profiler \
             -configuration Release \
-            -destination 'generic/platform=macOS' \
-            -archivePath 'build/Profiler-macOS.xcarchive' \
+            -destination '${{ matrix.destination }}' \
+            -archivePath '${{ matrix.archive }}' \
             MARKETING_VERSION='${{ steps.version.outputs.version }}' \
             CURRENT_PROJECT_VERSION='${{ github.run_number }}.${{ github.run_attempt }}' \
             -allowProvisioningUpdates \
@@ -167,7 +185,7 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           xcodebuild -exportArchive \
-            -archivePath 'build/Profiler-macOS.xcarchive' \
+            -archivePath '${{ matrix.archive }}' \
             -exportOptionsPlist build-exportOptions.plist \
             -allowProvisioningUpdates \
             -authenticationKeyPath ~/private_keys/AuthKey_"$ASC_KEY_ID".p8 \

@@ -15,11 +15,24 @@ concurrency:
 
 jobs:
   build:
-    name: Build (macOS)
+    name: Build (${{ matrix.name }})
     runs-on: macos-26
+    strategy:
+      fail-fast: false
+      # The same destinations the App Store workflow archives, so a build that
+      # only breaks on one platform is caught here rather than at upload.
+      matrix:
+        include:
+          - name: macOS
+            destination: generic/platform=macOS
+          - name: iOS
+            destination: generic/platform=iOS
     steps:
       - uses: actions/checkout@v7
 
+      # Worth having in the log: the runner's Xcode moves on its own schedule,
+      # and its type checker — not the local one — is what decides whether an
+      # expression is too complex to solve.
       - name: Show Xcode version
         run: xcodebuild -version
 
@@ -29,14 +42,37 @@ jobs:
             -project apps/Profiler.xcodeproj \
             -scheme Profiler \
             -configuration Release \
-            -destination 'generic/platform=macOS' \
+            -destination '${{ matrix.destination }}' \
             CODE_SIGNING_ALLOWED=NO
 
-  cli:
-    name: Build (capture CLI)
+  # Validates the ISO 11146 moment calculation and the export encoders against
+  # analytically-known beams, by running the built binary the way `make test`
+  # does — the same code the app ships, not a reimplementation.
+  #
+  # Signed ad hoc, because arm64 will not execute an unsigned binary and the
+  # runner has no signing identity. Entitlements are dropped along with it: an
+  # ad-hoc signature cannot carry a usable sandbox, and the app hangs on launch
+  # rather than failing if it tries. The self-test only measures beams and
+  # encodes bytes, so it needs neither the sandbox nor the camera.
+  self-test:
+    name: Analyser self-test
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
 
       - name: Build
-        run: ./Tools/build-cli.sh
+        run: |
+          xcodebuild build \
+            -project apps/Profiler.xcodeproj \
+            -scheme Profiler \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM= \
+            CODE_SIGN_ENTITLEMENTS=
+
+      - name: Run the self-test
+        run: |
+          build/DerivedData/Build/Products/Debug/Profiler.app/Contents/MacOS/Profiler --self-test
