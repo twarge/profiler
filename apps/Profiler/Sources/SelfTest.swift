@@ -59,8 +59,6 @@ enum SelfTest {
             settings.subtractDarkFrame = false
             let metrics = BeamAnalyzer.analyze(frame: frame, settings: settings)
 
-            let trueD4X = 2 * testCase.waistX
-            let trueD4Y = 2 * testCase.waistY
             let trueMajor = 2 * max(testCase.waistX, testCase.waistY)
             let trueMinor = 2 * min(testCase.waistX, testCase.waistY)
             let trueEllipticity = trueMinor / trueMajor

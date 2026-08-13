@@ -270,7 +270,7 @@ final class ProfilerModel {
             // Coalesce the burst of writes a slider drag produces.
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
-            await self?.persist()
+            self?.persist()
         }
     }
 
