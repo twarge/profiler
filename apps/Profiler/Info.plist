@@ -29,5 +29,20 @@
 	     so the prompt is unavoidable — this at least explains why it is being asked. -->
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>Profiler opens a session with the attached camera. macOS treats the camera's memory card as a removable volume; the app reads live-view frames only and does not read or modify files on the card.</string>
+
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 </dict>
 </plist>

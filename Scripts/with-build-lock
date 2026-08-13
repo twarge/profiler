@@ -1,0 +1,38 @@
+#!/bin/sh
+# Copyright (C) 2026 Twarge LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs one build step at a time per checkout: with-build-lock <command> [args…]
+#
+# Two builds of the same configuration into one DerivedData race codesign — the
+# second build rewrites dylibs inside the .app while the first is still signing
+# the bundle, and CodeSign fails with a nonzero exit. Concurrent makes are easy
+# to produce by accident (a slow build backgrounded, a second terminal), so the
+# Makefile wraps every build step in this.
+#
+# The lock is a directory because mkdir is atomic. It lives at the repo root,
+# not in build/, so `make clean` cannot delete a lock somebody is holding.
+
+set -eu
+
+lock="$(cd "$(dirname "$0")/.." && pwd)/.buildlock"
+
+while ! mkdir "$lock" 2>/dev/null; do
+    pid=$(cat "$lock/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+        # The holder is gone (crashed or killed -9 before its trap ran). mv is
+        # atomic, so of several waiters exactly one gets to bury the corpse;
+        # the others fail the mv and come around to try mkdir again.
+        if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
+            rm -rf "$lock.stale.$$"
+        fi
+        continue
+    fi
+    echo "==> Waiting for the build lock (held by pid ${pid:-unknown})…" >&2
+    sleep 2
+done
+
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT INT TERM
+
+"$@"

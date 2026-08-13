@@ -4,6 +4,9 @@ struct ContentView: View {
     @State private var model = ProfilerModel()
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showInspector = true
+    /// Space pauses only while the instrument pane holds focus, so it stays free for the
+    /// sidebar's own controls — where Space is how macOS activates whatever Tab landed on.
+    @FocusState private var beamHasFocus: Bool
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -11,43 +14,84 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 210, ideal: 300, max: 620)
         } detail: {
             MeasurementView(model: model)
+                // No focus ring: the pane is the whole instrument, and a border drawn round
+                // it would read as a state of the measurement rather than of the keyboard.
+                .focusable()
+                .focusEffectDisabled()
+                .focused($beamHasFocus)
+                .onKeyPress(.space) {
+                    guard model.isRunning else { return .ignored }
+                    model.frozen.toggle()
+                    return .handled
+                }
                 .navigationTitle(model.windowTitle)
-                .navigationSubtitle(model.status)
+                #if os(macOS)
+                .navigationSubtitle(captureStateSubtitle)
+                #else
+                // In the bar, not floating over the instrument: the camera name is the
+                // window's subject line, not a document heading.
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
                 .toolbar { toolbarContent }
                 .inspector(isPresented: $showInspector) {
                     MetricsInspector(model: model)
                         .inspectorColumnWidth(min: 210, ideal: 280, max: 480)
                 }
         }
-        .frame(minWidth: 980, minHeight: 640)
+        #if os(macOS)
+        .frame(minWidth: 720, minHeight: 480)
+        #endif
+        .defaultFocus($beamHasFocus, true)
         .task { await model.restoreAndAutostart() }
+    }
+
+    /// The run state, where the eye already goes for the window's subject: a dot and one
+    /// word. Green means frames are flowing; the beam view itself is the rest of the story.
+    private var captureStateSubtitle: Text {
+        let (color, label): (Color, String) = model.isRunning
+            ? (model.frozen ? (.orange, "Paused") : (.green, "Capturing"))
+            : (.secondary, "Idle")
+        return Text(Image(systemName: "circle.fill"))
+            .font(.system(size: 8))
+            .foregroundStyle(color)
+            + Text(" \(label)")
     }
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                Task {
-                    if model.isRunning { await model.stop() } else { await model.start() }
-                }
-            } label: {
-                Label(
-                    model.isRunning ? "Stop" : "Start",
-                    systemImage: model.isRunning ? "stop.fill" : "play.fill"
-                )
-            }
-            .help(model.isRunning ? "Stop capture" : "Start capture")
-
+            // Start and stop live beside the Backend picker in the sidebar. Pause stays here:
+            // it is used while watching the beam, not while setting the source up.
             Toggle(isOn: $model.frozen) {
-                Label(
-                    model.frozen ? "Resume" : "Pause",
-                    systemImage: model.frozen ? "play.fill" : "pause.fill"
-                )
+                Label("Pause", systemImage: "pause.fill")
             }
             .disabled(!model.isRunning)
-            .help("Hold the current frame without stopping the source")
+            .help(model.frozen
+                ? "Resume live frames (Space)"
+                : "Hold the current frame without stopping the source (Space)")
 
-            Spacer()
+            if !model.plottedQuantities.isEmpty {
+                Button {
+                    model.resetTimeHistory()
+                } label: {
+                    Label("Reset History", systemImage: "arrow.counterclockwise")
+                }
+                .help("Clear the retained time-series history")
+            }
+
+            if let export = model.currentExport {
+                ShareLink(items: export.shareFiles) { file in
+                    SharePreview(file.filename, icon: file.previewIcon(thumbnail: model.displayImage))
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                }
+                .help("Share the beam image, the profiles, and the metrics")
+            } else {
+                Button {} label: {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                }
+                .disabled(true)
+            }
 
             Toggle(isOn: $showInspector) {
                 Label("Measurement", systemImage: "sidebar.trailing")
@@ -59,75 +103,168 @@ struct ContentView: View {
 
 /// The instrument display: beam image, both integrated profiles, and a status strip.
 ///
-/// The image is aspect-fitted, so its drawn extent is computed once here and handed to both
-/// charts. That keeps a feature at image column `x` directly above its peak in the
-/// horizontal profile, and at row `y` directly beside its peak in the vertical one.
+/// The instrument first defines one outer box with the camera image's aspect ratio. The
+/// profile-size fraction is then removed from the box's top and right, scaling the image
+/// uniformly into the bottom-left remainder. The X and Y profiles occupy those reserved
+/// bands, separated from the image by a small fixed gutter.
 struct MeasurementView: View {
     var model: ProfilerModel
-
-    private let chartThickness: CGFloat = 130
+    private let profileGap: CGFloat = 4
+    private let splitHandleHeight: CGFloat = 9
+    @AppStorage("mainTimeSeriesSplit.v1") private var mainSplitFraction = 0.70
+    @State private var splitDragStart: Double?
+    #if os(macOS)
+    @AppStorage(StatusBarPreference.key) private var showStatusBar = false
+    #endif
 
     var body: some View {
         VStack(spacing: 0) {
-            GeometryReader { geometry in
-                let imageWidth = max(1, geometry.size.width - chartThickness - 1)
-                let imageHeight = max(1, geometry.size.height - chartThickness - 1)
-                let fitted = BeamImageView.fittedRect(
-                    imageSize: imageSize,
-                    in: CGSize(width: imageWidth, height: imageHeight)
-                )
+            if model.plottedQuantities.isEmpty {
+                instrumentPane
+            } else {
+                GeometryReader { geometry in
+                    let availableHeight = max(1, geometry.size.height - splitHandleHeight)
+                    let mainHeight = availableHeight * CGFloat(clampedSplitFraction)
 
-                VStack(spacing: 0) {
-                    // X profile sits directly above the image, baseline against it.
-                    HStack(spacing: 0) {
-                        ProfileChartView(
-                            profile: model.metrics.profileX,
-                            fit: model.metrics.fitX,
-                            centroid: model.metrics.centroidX,
-                            d4Sigma: model.metrics.d4SigmaX,
-                            orientation: .horizontal,
-                            label: "X",
-                            plotStart: fitted.minX,
-                            plotLength: fitted.width,
-                            amplitudeMax: sharedAmplitudeMax
-                        )
-                        .frame(width: imageWidth, height: chartThickness)
-
-                        Divider()
-
-                        Color.instrumentBackground
-                            .frame(width: chartThickness, height: chartThickness)
-                    }
-
-                    Divider()
-
-                    // Y profile sits directly right of the image, baseline against it.
-                    HStack(spacing: 0) {
-                        BeamImageView(model: model)
-                            .frame(width: imageWidth, height: imageHeight)
-
-                        Divider()
-
-                        ProfileChartView(
-                            profile: model.metrics.profileY,
-                            fit: model.metrics.fitY,
-                            centroid: model.metrics.centroidY,
-                            d4Sigma: model.metrics.d4SigmaY,
-                            orientation: .vertical,
-                            label: "Y",
-                            plotStart: fitted.minY,
-                            plotLength: fitted.height,
-                            amplitudeMax: sharedAmplitudeMax
-                        )
-                        .frame(width: chartThickness, height: imageHeight)
+                    VStack(spacing: 0) {
+                        instrumentPane
+                            .frame(height: mainHeight)
+                        splitHandle(availableHeight: availableHeight)
+                        TimeSeriesPanel(model: model)
+                            .frame(height: availableHeight - mainHeight)
                     }
                 }
             }
 
-            Divider()
-            statusBar
+            #if os(macOS)
+            if showStatusBar {
+                Divider()
+                statusBar
+            }
+            #endif
         }
-        .background(Color.instrumentBackground)
+        .background(Color.instrumentCanvas)
+    }
+
+    /// The aspect-fitted image/profile block within whatever share of the split it receives.
+    private var instrumentPane: some View {
+        GeometryReader { geometry in
+            let box = BeamImageView.fittedRect(
+                imageSize: imageSize,
+                in: geometry.size
+            ).size
+
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    if model.showProfiles {
+                        instrumentBlock(box: box)
+                    } else {
+                        BeamImageView(model: model)
+                            .frame(width: box.width, height: box.height)
+                    }
+                    Spacer(minLength: 0)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var clampedSplitFraction: Double {
+        min(0.90, max(0.35, mainSplitFraction))
+    }
+
+    /// A generous hit target around a visually quiet split-view divider.
+    private func splitHandle(availableHeight: CGFloat) -> some View {
+        ZStack {
+            Color.clear
+            Capsule()
+                .fill(.secondary.opacity(0.45))
+                .frame(width: 36, height: 3)
+        }
+        .frame(height: splitHandleHeight)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if splitDragStart == nil {
+                        splitDragStart = clampedSplitFraction
+                    }
+                    let start = splitDragStart ?? clampedSplitFraction
+                    let delta = Double(value.translation.height / availableHeight)
+                    mainSplitFraction = min(0.90, max(0.35, start + delta))
+                }
+                .onEnded { _ in splitDragStart = nil }
+        )
+        .accessibilityLabel("Resize main view and time-series plots")
+        .accessibilityValue("Main view \(Int(clampedSplitFraction * 100)) percent")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment:
+                mainSplitFraction = min(0.90, clampedSplitFraction + 0.05)
+            case .decrement:
+                mainSplitFraction = max(0.35, clampedSplitFraction - 0.05)
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    /// Subdivides the aspect-fitted outer box. Removing the same fraction on each axis
+    /// leaves an image rectangle scaled uniformly from the box, hence with the source
+    /// image's exact aspect ratio.
+    private func instrumentBlock(box: CGSize) -> some View {
+        let fraction = CGFloat(model.profileChartFraction)
+        let imageWidth = max(1, box.width * (1 - fraction))
+        let imageHeight = max(1, box.height * (1 - fraction))
+        let profileWidth = max(0, box.width - imageWidth - profileGap)
+        let profileHeight = max(0, box.height - imageHeight - profileGap)
+
+        return VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                // Live raw profiles, so the curves track the capture rate; the fit
+                // comes from the latest analysis and may lag a few frames behind
+                // the curve it annotates.
+                ProfileChartView(
+                    profile: model.liveProfileX,
+                    fit: model.metrics.fitX,
+                    centroid: model.metrics.centroidX,
+                    d4Sigma: model.metrics.d4SigmaX,
+                    orientation: .horizontal,
+                    amplitudeMax: sharedAmplitudeMax
+                )
+                .frame(width: imageWidth, height: profileHeight)
+                .measurementDrag(model.currentExport?.file(.profileX))
+
+                // The empty corner is the intersection of the two reserved profile bands.
+                Color.clear
+                    .frame(width: profileWidth, height: profileHeight)
+            }
+
+            Color.clear
+                .frame(height: profileGap)
+
+            // Y is to the image's right, across the fixed profile gutter.
+            HStack(spacing: 0) {
+                BeamImageView(model: model)
+                    .frame(width: imageWidth, height: imageHeight)
+
+                Color.clear
+                    .frame(width: profileGap, height: imageHeight)
+
+                ProfileChartView(
+                    profile: model.liveProfileY,
+                    fit: model.metrics.fitY,
+                    centroid: model.metrics.centroidY,
+                    d4Sigma: model.metrics.d4SigmaY,
+                    orientation: .vertical,
+                    amplitudeMax: sharedAmplitudeMax
+                )
+                .frame(width: profileWidth, height: imageHeight)
+                .measurementDrag(model.currentExport?.file(.profileY))
+            }
+        }
     }
 
     private var imageSize: CGSize {
@@ -142,27 +279,15 @@ struct MeasurementView: View {
     /// shows the narrow axis taller. That is the honest picture — normalising each to its
     /// own maximum would draw every beam as though it were round.
     private var sharedAmplitudeMax: Double? {
-        let peakX = model.metrics.profileX.max().map(Double.init) ?? 0
-        let peakY = model.metrics.profileY.max().map(Double.init) ?? 0
+        let peakX = model.liveProfileX.max().map(Double.init) ?? 0
+        let peakY = model.liveProfileY.max().map(Double.init) ?? 0
         let peak = max(peakX, peakY)
         return peak > 0 ? peak : nil
     }
 
     private var statusBar: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(model.isRunning ? Color.green : Color.secondary)
-                .frame(width: 7, height: 7)
-            Text(model.isRunning ? "Capturing" : "Idle")
-                .font(.caption)
-            if model.frozen {
-                Label("Paused", systemImage: "pause.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-
             if model.isRunning {
-                Divider().frame(height: 12)
                 Text(String(
                     format: "capture %.1f · analysed %.1f fps",
                     model.captureFPS, model.fps))
@@ -184,5 +309,28 @@ struct MeasurementView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(.bar)
+    }
+}
+
+extension View {
+    /// Drag-out for a measurement artifact; inert until there is anything to drag.
+    @ViewBuilder
+    func measurementDrag(_ file: ExportFile?) -> some View {
+        if let file {
+            draggable(file)
+        } else {
+            self
+        }
+    }
+}
+
+extension ExportFile {
+    /// Share-sheet thumbnail: the live beam picture for the image file — already rendered,
+    /// so no encoder runs for a preview — and a glyph for the data files.
+    func previewIcon(thumbnail: CGImage?) -> Image {
+        if content == .image, let thumbnail {
+            return Image(decorative: thumbnail, scale: 1)
+        }
+        return Image(systemName: iconSystemName)
     }
 }

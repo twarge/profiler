@@ -13,6 +13,10 @@ struct AnalysisSettings {
     var maxIterations: Int = 8
     var convergenceTolerance: Double = 0.005
     var subtractDarkFrame: Bool = true
+    /// Whether to fit a Gaussian to each marginal profile. The measurement never depends on
+    /// the fit — every reported width is a second moment — so this switches off the work as
+    /// well as the overlay, which is worth having on a beam the fit cannot describe anyway.
+    var fitProfiles: Bool = true
     /// Restricts analysis to a user-drawn region. Nil means start from the full frame.
     var userROI: Aperture?
     var channel: MeasurementChannel = .green
@@ -70,6 +74,7 @@ enum BeamAnalyzer {
         let w = frame.width
         let h = frame.height
         guard w > 4, h > 4, frame.pixels.count == w * h else { return metrics }
+        var clock = StageClock()
 
         // --- Saturation and peak, measured on the raw frame -------------------------
         var saturated = 0
@@ -82,6 +87,7 @@ enum BeamAnalyzer {
         metrics.saturatedPixels = saturated
         metrics.saturatedFraction = Double(saturated) / Double(frame.count)
         metrics.peak = robustPeak(histogram: histogram, total: frame.count)
+        clock.mark("histogram + saturation")
 
         // --- Background estimate ----------------------------------------------------
         var subtracted = frame.pixels
@@ -89,7 +95,10 @@ enum BeamAnalyzer {
             for i in 0..<subtracted.count { subtracted[i] -= dark[i] }
         }
 
+        clock.mark("copy + dark subtract")
+
         let (bgMean, bgSigma) = estimateBackground(subtracted, width: w, height: h)
+        clock.mark("background estimate")
         metrics.backgroundMean = Double(bgMean)
         metrics.backgroundSigma = Double(bgSigma)
 
@@ -109,6 +118,8 @@ enum BeamAnalyzer {
             subtracted[i] = v
             masked[i] = v > threshold ? v - threshold : 0
         }
+
+        clock.mark("threshold mask")
 
         // --- Iterative aperture, per ISO 11146 --------------------------------------
         let roi = settings.userROI?.clamped(toWidth: w, height: h)
@@ -162,6 +173,8 @@ enum BeamAnalyzer {
             aperture = next
         }
 
+        clock.mark("aperture iteration (masked)")
+
         // The clipped widths that sized this aperture are themselves biased low, so refine
         // it against the unclipped moments. Expansion is capped relative to the clipped
         // aperture so a bad baseline estimate can't run the aperture away to the frame edge.
@@ -180,6 +193,8 @@ enum BeamAnalyzer {
             aperture = next
             moment = moments(subtracted, width: w, height: h, aperture: aperture)
         }
+
+        clock.mark("final moments (unclipped)")
 
         // Without anything above the noise floor there is no beam to measure. Falling
         // through here would return full-frame moments of the ambient scene, which look
@@ -234,15 +249,54 @@ enum BeamAnalyzer {
         }
         metrics.profileX = profileX
         metrics.profileY = profileY
+        clock.mark("marginal profiles")
 
-        metrics.fitX = GaussianFit.fit(
-            profile: profileX, seedCenter: m.cx, seedWidth: max(1, m.d4x / 2))
-        metrics.fitY = GaussianFit.fit(
-            profile: profileY, seedCenter: m.cy, seedWidth: max(1, m.d4y / 2))
+        if settings.fitProfiles {
+            metrics.fitX = GaussianFit.fit(
+                profile: profileX, seedCenter: m.cx, seedWidth: max(1, m.d4x / 2))
+            metrics.fitY = GaussianFit.fit(
+                profile: profileY, seedCenter: m.cy, seedWidth: max(1, m.d4y / 2))
+        }
         metrics.measuredFWHMX = GaussianFit.measuredFWHM(profile: profileX)
         metrics.measuredFWHMY = GaussianFit.measuredFWHM(profile: profileY)
+        clock.mark("gaussian fits")
 
         return metrics
+    }
+
+    /// Raw marginal sums for the live display path: dark- and baseline-corrected but
+    /// unapertured, so they cost one pass over the frame and need no beam location.
+    ///
+    /// Away from the beam the baseline-corrected rows sum to ≈0, so these register with
+    /// the apertured profiles the full analysis produces — the live curve and the (slightly
+    /// older) fit overlay drawn on top of it agree in amplitude and offset.
+    static func quickProfiles(
+        frame: BeamFrame, darkFrame: [Float]? = nil, subtractDark: Bool = false
+    ) -> (x: [Float], y: [Float]) {
+        let w = frame.width
+        let h = frame.height
+        guard w > 4, h > 4, frame.pixels.count == w * h else { return ([], []) }
+
+        var buffer = frame.pixels
+        if subtractDark, let dark = darkFrame, dark.count == buffer.count {
+            for i in 0..<buffer.count { buffer[i] -= dark[i] }
+        }
+        let (mean, _) = estimateBackground(buffer, width: w, height: h)
+
+        // Baseline pre-subtracted from the accumulators, so the loop stays one add per pixel.
+        var profileX = [Float](repeating: -mean * Float(h), count: w)
+        var profileY = [Float](repeating: 0, count: h)
+        for y in 0..<h {
+            let row = y * w
+            var rowSum: Float = 0
+            for x in 0..<w {
+                let v = buffer[row + x]
+                profileX[x] += v
+                rowSum += v
+            }
+            profileY[y] = rowSum - mean * Float(w)
+        }
+        return (profileX, profileY)
     }
 
     // MARK: - Internals

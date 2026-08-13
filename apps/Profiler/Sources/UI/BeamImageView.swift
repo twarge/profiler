@@ -1,11 +1,16 @@
 import SwiftUI
 
 extension Color {
-    /// The measurement area keeps a fixed dark ground in both appearances: colormaps are
-    /// designed against black, and a light surround shifts how the low end reads.
-    static let instrumentBackground = Color(red: 0.055, green: 0.055, blue: 0.065)
-    static let instrumentForeground = Color.white.opacity(0.55)
-    static let instrumentGridline = Color.white.opacity(0.22)
+    /// The canvas behind the instrument content: the same material Keynote and Pages put
+    /// behind a document page, so it tracks the system appearance. Only the beam image
+    /// itself stays dark — that is the sensor data, not chrome.
+    static var instrumentCanvas: Color {
+        #if os(macOS)
+        Color(nsColor: .underPageBackgroundColor)
+        #else
+        Color(uiColor: .secondarySystemBackground)
+        #endif
+    }
 }
 
 /// The beam image with measurement overlays drawn in image coordinates.
@@ -18,27 +23,19 @@ struct BeamImageView: View {
             let rect = Self.fittedRect(imageSize: imageSize, in: geometry.size)
 
             ZStack(alignment: .topLeading) {
-                Color.instrumentBackground
-
                 if let image = model.displayImage {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .interpolation(.none)
                         .frame(width: rect.width, height: rect.height)
+                        .measurementDrag(model.currentExport?.file(.image))
                         .offset(x: rect.minX, y: rect.minY)
                 } else {
-                    VStack(spacing: 10) {
-                        Image(systemName: "camera.metering.spot")
-                            .font(.system(size: 38))
-                        Text("No frames yet")
-                            .font(.headline)
+                    ContentUnavailableView {
+                        Label("No Frames Yet", systemImage: "camera.metering.spot")
+                    } description: {
                         Text("Choose a backend and press Start.")
-                            .font(.callout)
-                            .foregroundStyle(Color.white.opacity(0.4))
                     }
-                    // Explicit light colours: the semantic styles resolve dark in light
-                    // appearance and would vanish against this background.
-                    .foregroundStyle(Color.instrumentForeground)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
@@ -55,7 +52,6 @@ struct BeamImageView: View {
                 }
             }
         }
-        .background(Color.instrumentBackground)
     }
 
     private var currentImageSize: CGSize {
@@ -87,21 +83,6 @@ struct BeamImageView: View {
             CGPoint(x: origin.x + CGFloat(x) * scale, y: origin.y + CGFloat(y) * scale)
         }
 
-        if model.showAperture, !m.aperture.isEmpty {
-            let topLeft = point(Double(m.aperture.x0), Double(m.aperture.y0))
-            let size = CGSize(
-                width: CGFloat(m.aperture.width) * scale,
-                height: CGFloat(m.aperture.height) * scale
-            )
-            var path = Path(CGRect(origin: topLeft, size: size))
-            context.stroke(
-                path,
-                with: .color(.cyan.opacity(0.55)),
-                style: StrokeStyle(lineWidth: 1, dash: [5, 4])
-            )
-            path = Path()
-        }
-
         let center = point(m.centroidX, m.centroidY)
 
         if model.showEllipse, m.majorDiameter > 0 {
@@ -119,23 +100,29 @@ struct BeamImageView: View {
                 width: semiMajor * 2, height: semiMinor * 2
             )
             let path = CGPath(ellipseIn: ellipse, transform: &transform)
+            // The system highlight colour, as the profile fits are: it marks what the app
+            // derived, over a picture whose every other colour belongs to the colormap.
             context.stroke(
                 Path(path),
-                with: .color(.green),
+                with: .color(.accentColor),
                 style: StrokeStyle(lineWidth: 1.5)
             )
 
             // Major axis tick, so the reported angle is visually verifiable.
-            let dx = cos(rotation.radians) * semiMajor
-            let dy = sin(rotation.radians) * semiMajor
-            var axis = Path()
-            axis.move(to: CGPoint(x: center.x - dx, y: center.y - dy))
-            axis.addLine(to: CGPoint(x: center.x + dx, y: center.y + dy))
-            context.stroke(
-                axis,
-                with: .color(.green.opacity(0.6)),
-                style: StrokeStyle(lineWidth: 1, dash: [3, 3])
-            )
+            if model.showMajorAxis {
+                let dx = cos(rotation.radians) * semiMajor
+                let dy = sin(rotation.radians) * semiMajor
+                var axis = Path()
+                axis.move(to: CGPoint(x: center.x - dx, y: center.y - dy))
+                axis.addLine(to: CGPoint(x: center.x + dx, y: center.y + dy))
+                // Full strength, not dimmed: it crosses the beam's brightest bands, where a
+                // faded line disappears. The dashes are what distinguish it from the contour.
+                context.stroke(
+                    axis,
+                    with: .color(.accentColor),
+                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])
+                )
+            }
         }
 
         if model.showCrosshair {

@@ -1,7 +1,14 @@
-import AppKit
 import CoreGraphics
 import Foundation
+import ImageIO
 import Observation
+import UniformTypeIdentifiers
+
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 @MainActor
 @Observable
@@ -24,6 +31,11 @@ final class ProfilerModel {
 
     // Capture
     var sourceKind: SourceKind = .synthetic {
+        willSet {
+            guard newValue != sourceKind, !isApplyingProfile else { return }
+            saveTask?.cancel()
+            persist()
+        }
         didSet {
             guard sourceKind != oldValue else { return }
             switchToCurrentDeviceProfile()
@@ -42,6 +54,12 @@ final class ProfilerModel {
     // Device selection
     var ptpCameras: [PTPTransport.DiscoveredCamera] = []
     var selectedPTPCameraID: String? {
+        willSet {
+            guard newValue != selectedPTPCameraID,
+                  sourceKind == .ptp, !isApplyingProfile else { return }
+            saveTask?.cancel()
+            persist()
+        }
         didSet {
             guard selectedPTPCameraID != oldValue else { return }
             // Only reload settings when this selection is the one in play. Discovery
@@ -52,6 +70,12 @@ final class ProfilerModel {
     }
     var uvcDevices: [UVCDeviceInfo] = []
     var selectedUVCDeviceID: String? {
+        willSet {
+            guard newValue != selectedUVCDeviceID,
+                  sourceKind == .uvc, !isApplyingProfile else { return }
+            saveTask?.cancel()
+            persist()
+        }
         didSet {
             guard selectedUVCDeviceID != oldValue else { return }
             if sourceKind == .uvc { switchToCurrentDeviceProfile() } else { scheduleSave() }
@@ -59,33 +83,82 @@ final class ProfilerModel {
     }
     /// Start capturing on launch using the remembered backend and camera.
     var autostart = true { didSet { scheduleSave() } }
-    /// Name of the device whose stored settings are currently loaded, for the sidebar.
-    var activeProfileName: String?
 
     // Analysis
     var settings = AnalysisSettings() {
         didSet {
             pipeline.settings = settings
             source?.measurementChannel = settings.channel
+            if !useBareSensorPitch { manualMicronsPerPixel = settings.micronsPerPixel }
             scheduleSave()
         }
     }
     var metrics = BeamMetrics()
     var frozen = false { didSet { pipeline.isFrozen = frozen } }
 
+    /// Pitch comes from the streamed frame width rather than the entered value. Held here
+    /// rather than in `AnalysisSettings` because the analyser only ever wants the resulting
+    /// number, and it is recomputed whenever the stream width changes.
+    var useBareSensorPitch = true {
+        didSet {
+            guard useBareSensorPitch != oldValue else { return }
+            if useBareSensorPitch {
+                applyBareSensorPitch()
+            } else {
+                // Hand the entered calibration back, so the checkbox is undoable rather
+                // than a one-way overwrite of a number that was measured, not guessed.
+                settings.micronsPerPixel = manualMicronsPerPixel
+            }
+            scheduleSave()
+        }
+    }
+    /// The pitch as entered, held aside while the bare-sensor figure drives the analyser.
+    /// This, not the derived value, is what gets stored for the device.
+    private var manualMicronsPerPixel: Double = DeviceProfile().micronsPerPixel
+
     // Display
-    var colormap: Colormap = .inferno { didSet { rerenderCurrentFrame(); scheduleSave() } }
-    var logarithmic = false { didSet { rerenderCurrentFrame(); scheduleSave() } }
-    var displayGain: Double = 1.0 { didSet { rerenderCurrentFrame(); scheduleSave() } }
+    var colormap: Colormap = .turbo { didSet { displaySettingsChanged() } }
+    var logarithmic = false { didSet { displaySettingsChanged() } }
+    var displayGain: Double = 1.0 { didSet { displaySettingsChanged() } }
     var showCrosshair = true { didSet { scheduleSave() } }
     var showEllipse = true { didSet { scheduleSave() } }
-    var showAperture = true { didSet { scheduleSave() } }
+    var showMajorAxis = true { didSet { scheduleSave() } }
+    var showProfiles = true { didSet { scheduleSave() } }
+    /// The current value drawn large on each time-series row.
+    var showPlotReadout = true { didSet { scheduleSave() } }
+    /// How much history the time-series plots keep and show, in seconds. Pushed straight
+    /// into the recorder, which prunes to it on the next sample.
+    var plotWindow: Double = 60 {
+        didSet { timeSeries.window = plotWindow; scheduleSave() }
+    }
+    /// Significant figures for every displayed measurement. A display choice, not an
+    /// analysis one: exports carry full precision regardless.
+    var significantFigures = 3 { didSet { scheduleSave() } }
+    /// Fraction reserved for the profile bands on each axis of the image-aspect box. A
+    /// fraction rather than a pixel count survives resizing and means the same thing on a
+    /// laptop and an iPad.
+    var profileChartFraction: Double = 0.18 { didSet { scheduleSave() } }
+    var expandedSettingsSections: Set<String> = ["source", "gain"] {
+        didSet { scheduleSave() }
+    }
+    var expandedMetricSections: Set<String> = [
+        "position", "size", "shape", "signal", "truth"
+    ] {
+        didSet { scheduleSave() }
+    }
     var displayImage: CGImage?
+    /// Raw marginal sums from the live lane, updated at the display rate. The measured,
+    /// apertured profiles live in `metrics` and lag behind these.
+    var liveProfileX: [Float] = []
+    var liveProfileY: [Float] = []
 
     // Gain servo
     var gain = GainState()
     let gainController = GainController()
-    var autoGainEnabled = false {
+    /// On by default: an unexposed beam is the usual reason a first measurement looks wrong,
+    /// and the servo is the thing that fixes it. Sources that cannot set gain report the
+    /// correction as an advisory instead, so this stays useful even when it cannot act.
+    var autoGainEnabled = true {
         didSet {
             gainController.settings.enabled = autoGainEnabled
             gainController.reset()
@@ -97,6 +170,31 @@ final class ProfilerModel {
         didSet { gainController.settings.targetPeak = targetPeak; scheduleSave() }
     }
     var advisory: String?
+
+    // Time series
+
+    /// Quantities the operator has asked to display. Recording is independent of this set,
+    /// so opening a plot reveals the complete retained history immediately.
+    var plottedQuantities: Set<PlotQuantity> = [] {
+        didSet { scheduleSave() }
+    }
+    private(set) var timeSeries = TimeSeriesRecorder()
+
+    func togglePlot(_ quantity: PlotQuantity) {
+        if plottedQuantities.contains(quantity) {
+            plottedQuantities.remove(quantity)
+        } else {
+            plottedQuantities.insert(quantity)
+        }
+    }
+
+    func clearPlots() {
+        plottedQuantities.removeAll()
+    }
+
+    func resetTimeHistory() {
+        timeSeries.clear()
+    }
 
     // Dark frame
     var darkFrameStatus: String?
@@ -134,6 +232,11 @@ final class ProfilerModel {
         pipeline.onResult = { [weak self] frame, metrics in
             Task { @MainActor in self?.publish(frame: frame, metrics: metrics) }
         }
+        pipeline.onLiveView = { [weak self] image, profileX, profileY in
+            Task { @MainActor in
+                self?.publishLiveView(image: image, profileX: profileX, profileY: profileY)
+            }
+        }
         pipeline.onDarkFrameProgress = { [weak self] done, total in
             Task { @MainActor in
                 self?.darkFrameStatus = "Capturing dark frame \(done)/\(total)…"
@@ -165,17 +268,31 @@ final class ProfilerModel {
         ptpSource.beginDiscovery()
         refreshUVCDevices()
 
-        // Release the camera on quit. Without this the session outlives the process and the
-        // device stays claimed until it is unplugged.
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.saveTask?.cancel()
-                self?.persist()
-                self?.ptpSource.closeImmediately()
+        // Release the camera when the app goes away. Without this the session outlives the
+        // process and the device stays claimed until it is unplugged.
+        #if os(macOS)
+        let releasePoints = [NSApplication.willTerminateNotification]
+        #else
+        // iOS takes the USB device away the moment the app leaves the foreground, and a
+        // suspended app can be killed without ever seeing willTerminate. Backgrounding is
+        // the last point at which the session can still be closed cleanly.
+        let releasePoints = [
+            UIApplication.didEnterBackgroundNotification,
+            UIApplication.willTerminateNotification,
+        ]
+        #endif
+
+        for point in releasePoints {
+            NotificationCenter.default.addObserver(
+                forName: point,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.saveTask?.cancel()
+                    self?.persist()
+                    self?.ptpSource.closeImmediately()
+                }
             }
         }
     }
@@ -214,6 +331,22 @@ final class ProfilerModel {
         }
     }
 
+    /// Sensor preset matching the attached camera, if the library knows it. Synthetic frames
+    /// have no physical sensor, so they deliberately match nothing.
+    var detectedSensor: SensorPreset? {
+        guard sourceKind != .synthetic else { return nil }
+        return SensorLibrary.preset(forDeviceName: currentDeviceName)
+    }
+
+    /// The preset's pitch at the width actually being streamed, which is the number the
+    /// analyser wants. Nil until a frame has arrived and the stream width is known.
+    var detectedSensorPitch: Double? {
+        guard let preset = detectedSensor, let frame = lastFrame, frame.width > 0 else {
+            return nil
+        }
+        return preset.pitchMicrons(forFrameWidth: frame.width)
+    }
+
     private func restoreAppState() {
         isApplyingProfile = true
         let state = store.appState
@@ -233,10 +366,7 @@ final class ProfilerModel {
 
     private func applyProfile(_ profile: DeviceProfile?) {
         isApplyingProfile = true
-        defer {
-            isApplyingProfile = false
-            activeProfileName = currentDeviceName
-        }
+        defer { isApplyingProfile = false }
 
         let p = profile ?? DeviceProfile()
         var next = settings
@@ -245,6 +375,7 @@ final class ProfilerModel {
         next.noiseSigmaMultiplier = p.noiseSigmaMultiplier
         next.apertureFactor = p.apertureFactor
         next.subtractDarkFrame = p.subtractDarkFrame
+        next.fitProfiles = p.fitProfiles
         settings = next
         pipeline.settings = next
         source?.measurementChannel = next.channel
@@ -256,7 +387,23 @@ final class ProfilerModel {
         displayGain = p.displayGain
         showCrosshair = p.showCrosshair
         showEllipse = p.showEllipse
-        showAperture = p.showAperture
+        showMajorAxis = p.showMajorAxis
+        showProfiles = p.showProfiles
+        showPlotReadout = p.showPlotReadout
+        significantFigures = p.significantFigures
+        plotWindow = p.plotWindow
+        profileChartFraction = p.profileChartFraction
+        expandedSettingsSections = Set(p.expandedSettingsSections)
+        expandedMetricSections = Set(p.expandedMetricSections)
+        // The recorder holds the previous device's series; the quantities may be the same
+        // but the beam is not, so it starts empty rather than splicing two setups together.
+        timeSeries.clear()
+        plottedQuantities = Set(p.plottedQuantities)
+        manualMicronsPerPixel = p.micronsPerPixel
+        useBareSensorPitch = p.useBareSensorPitch
+        // With the checkbox on there may be no frame yet to derive from; the next one
+        // applies it through `publish`.
+        if useBareSensorPitch { applyBareSensorPitch() }
 
         if profile == nil {
             status = "New device — using default settings."
@@ -277,11 +424,13 @@ final class ProfilerModel {
     private func persist() {
         var profile = DeviceProfile()
         profile.deviceName = currentDeviceName
-        profile.micronsPerPixel = settings.micronsPerPixel
+        profile.micronsPerPixel = manualMicronsPerPixel
+        profile.useBareSensorPitch = useBareSensorPitch
         profile.channel = settings.channel
         profile.noiseSigmaMultiplier = settings.noiseSigmaMultiplier
         profile.apertureFactor = settings.apertureFactor
         profile.subtractDarkFrame = settings.subtractDarkFrame
+        profile.fitProfiles = settings.fitProfiles
         profile.autoGainEnabled = autoGainEnabled
         profile.targetPeak = targetPeak
         profile.colormap = colormap
@@ -289,7 +438,16 @@ final class ProfilerModel {
         profile.displayGain = displayGain
         profile.showCrosshair = showCrosshair
         profile.showEllipse = showEllipse
-        profile.showAperture = showAperture
+        profile.showMajorAxis = showMajorAxis
+        profile.showProfiles = showProfiles
+        profile.showPlotReadout = showPlotReadout
+        profile.significantFigures = significantFigures
+        profile.plotWindow = plotWindow
+        // Sorted, so the stored JSON does not churn with the set's iteration order.
+        profile.plottedQuantities = plottedQuantities.sorted { $0.rawValue < $1.rawValue }
+        profile.profileChartFraction = profileChartFraction
+        profile.expandedSettingsSections = expandedSettingsSections.sorted()
+        profile.expandedMetricSections = expandedMetricSections.sorted()
         store.save(profile, for: currentDeviceKey)
 
         var state = store.appState
@@ -298,12 +456,6 @@ final class ProfilerModel {
         state.selectedUVCDeviceID = selectedUVCDeviceID
         state.autostart = autostart
         store.appState = state
-    }
-
-    func forgetCurrentDevice() {
-        store.forget(key: currentDeviceKey)
-        applyProfile(nil)
-        status = "Cleared stored settings for \(currentDeviceName)."
     }
 
     // MARK: - Autostart
@@ -389,7 +541,6 @@ final class ProfilerModel {
             await refreshGainState()
             // Write the working configuration straight through rather than waiting on the
             // debounce, so a later crash can't lose the fact that this setup ran.
-            activeProfileName = currentDeviceName
             persist()
         } catch {
             errorMessage = error.localizedDescription
@@ -423,20 +574,41 @@ final class ProfilerModel {
 
     // MARK: - Frame handling
 
+    /// The full measurement landing — possibly several live frames after the picture it
+    /// describes was shown.
     private func publish(frame: BeamFrame, metrics: BeamMetrics) {
         lastFrame = frame
         self.metrics = metrics
-        displayImage = BeamImageRenderer.makeImage(
-            frame: frame,
-            colormap: colormap,
-            displayGain: displayGain,
-            logarithmic: logarithmic
+        // Before recording anything derived from the pitch: a source can change its stream
+        // width mid-run, and a stale pitch would silently rescale every reported size.
+        if useBareSensorPitch { applyBareSensorPitch() }
+        timeSeries.record(
+            metrics: metrics,
+            gain: gain,
+            micronsPerPixel: settings.micronsPerPixel
         )
-        updateFrameRate()
+        markAnalysed()
 
         Task { await self.runGainServo(metrics: metrics) }
     }
 
+    /// The live lane: picture and raw profiles at the display rate, no measurement yet.
+    private func publishLiveView(image: CGImage?, profileX: [Float], profileY: [Float]) {
+        if let image { displayImage = image }
+        liveProfileX = profileX
+        liveProfileY = profileY
+        updateCaptureCounters()
+    }
+
+    private func displaySettingsChanged() {
+        pipeline.displaySettings = DisplaySettings(
+            colormap: colormap, displayGain: displayGain, logarithmic: logarithmic)
+        rerenderCurrentFrame()
+        scheduleSave()
+    }
+
+    /// Re-render on the analysed frame, so a colormap or gain change is visible while
+    /// frozen or stopped; when running, the next live frame supersedes it immediately.
     private func rerenderCurrentFrame() {
         guard let frame = lastFrame else { return }
         displayImage = BeamImageRenderer.makeImage(
@@ -447,7 +619,7 @@ final class ProfilerModel {
         )
     }
 
-    private func updateFrameRate() {
+    private func markAnalysed() {
         let now = Date()
         frameTimestamps.append(now)
         frameTimestamps.removeAll { now.timeIntervalSince($0) > 2 }
@@ -455,9 +627,12 @@ final class ProfilerModel {
             let span = now.timeIntervalSince(first)
             fps = span > 0 ? Double(frameTimestamps.count - 1) / span : 0
         }
+    }
 
-        // Capture rate is measured from the pipeline's own counter, so it reflects what the
-        // camera actually delivered rather than what survived analysis.
+    /// Capture rate is measured from the pipeline's own counter, so it reflects what the
+    /// camera actually delivered rather than what survived analysis.
+    private func updateCaptureCounters() {
+        let now = Date()
         let counters = pipeline.counters
         droppedFrames = counters.dropped
         if let (mark, count) = captureRateMark {
@@ -540,103 +715,48 @@ final class ProfilerModel {
     /// width. The a7C's 35.6 mm imager is 6000 px wide natively (5.94 µm), so a stream at
     /// any other width scales the effective pitch proportionally.
     func assumedBareSensorScale() -> Double {
-        guard let image = displayImage, image.width > 0 else { return 5.94 }
-        return 35_600.0 / Double(image.width)
+        guard let width = streamedFrameWidth else { return 5.94 }
+        return 35_600.0 / Double(width)
+    }
+
+    /// Width of the frames actually arriving, which is what the bare-sensor pitch divides
+    /// into the sensor width. Nil before the first frame, when there is nothing to divide.
+    var streamedFrameWidth: Int? {
+        guard let frame = lastFrame, frame.width > 0 else { return nil }
+        return frame.width
+    }
+
+    /// Pushes the derived pitch into the analyser. Called when the checkbox goes on and on
+    /// every frame while it stays on, since a source can change its stream width mid-run.
+    func applyBareSensorPitch() {
+        let pitch = assumedBareSensorScale()
+        guard settings.micronsPerPixel != pitch else { return }
+        settings.micronsPerPixel = pitch
     }
 
     // MARK: - Export
 
-    func exportMeasurement() {
-        guard let frame = lastFrame else {
-            errorMessage = "Nothing to export yet."
-            return
-        }
-
-        let panel = NSSavePanel()
-        panel.title = "Export measurement"
-        panel.nameFieldStringValue = "beam-\(Self.timestampString())"
-        panel.message = "Writes a PNG, a CSV of both profiles, and a JSON of the metrics."
-
-        guard panel.runModal() == .OK, let base = panel.url else { return }
-        let directory = base.deletingLastPathComponent()
-        let stem = base.deletingPathExtension().lastPathComponent
-
-        do {
-            if let image = displayImage {
-                let rep = NSBitmapImageRep(cgImage: image)
-                if let png = rep.representation(using: .png, properties: [:]) {
-                    try png.write(to: directory.appendingPathComponent("\(stem).png"))
-                }
-            }
-            try exportCSV(to: directory.appendingPathComponent("\(stem)-profiles.csv"))
-            try exportJSON(frame: frame, to: directory.appendingPathComponent("\(stem)-metrics.json"))
-            status = "Exported to \(directory.path)."
-        } catch {
-            errorMessage = "Export failed: \(error.localizedDescription)"
-        }
-    }
-
-    private func exportCSV(to url: URL) throws {
-        let scale = settings.micronsPerPixel
-        var text = "axis,index,position_um,intensity\n"
-        for (i, v) in metrics.profileX.enumerated() {
-            let position = (Double(i) - metrics.centroidX) * scale
-            text += "x,\(i),\(position),\(v)\n"
-        }
-        for (i, v) in metrics.profileY.enumerated() {
-            let position = (Double(i) - metrics.centroidY) * scale
-            text += "y,\(i),\(position),\(v)\n"
-        }
-        try text.write(to: url, atomically: true, encoding: .utf8)
-    }
-
-    private func exportJSON(frame: BeamFrame, to url: URL) throws {
-        let scale = settings.micronsPerPixel
-        var payload: [String: Any] = [
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "source": sourceKind.rawValue,
-            "frame_width_px": frame.width,
-            "frame_height_px": frame.height,
-            "microns_per_pixel": scale,
-            "channel": settings.channel.rawValue,
-            "noise_threshold_sigma": settings.noiseSigmaMultiplier,
-            "aperture_factor": settings.apertureFactor,
-            "dark_frame_subtracted": hasDarkFrame && settings.subtractDarkFrame,
-            "centroid_x_um": metrics.centroidX * scale,
-            "centroid_y_um": metrics.centroidY * scale,
-            "d4sigma_x_um": metrics.d4SigmaX * scale,
-            "d4sigma_y_um": metrics.d4SigmaY * scale,
-            "major_diameter_um": metrics.majorDiameter * scale,
-            "minor_diameter_um": metrics.minorDiameter * scale,
-            "ellipticity": metrics.ellipticity,
-            "angle_deg": metrics.angleDegrees,
-            "peak_fraction_full_scale": metrics.peak,
-            "saturated_fraction": metrics.saturatedFraction,
-            "saturated": metrics.isSaturated,
-            "background_mean": metrics.backgroundMean,
-            "background_sigma": metrics.backgroundSigma,
-            "converged": metrics.converged,
-            "iterations": metrics.iterations,
-        ]
-        if let iso = gain.currentISO { payload["iso"] = iso }
-        if let shutter = gain.shutterLabel { payload["shutter"] = shutter }
-        if let fit = metrics.fitX {
-            payload["fit_x_d4sigma_um"] = fit.d4SigmaEquivalent * scale
-            payload["fit_x_r_squared"] = fit.rSquared
-        }
-        if let fit = metrics.fitY {
-            payload["fit_y_d4sigma_um"] = fit.d4SigmaEquivalent * scale
-            payload["fit_y_r_squared"] = fit.rSquared
-        }
-
-        let data = try JSONSerialization.data(
-            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url)
-    }
-
-    private static func timestampString() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter.string(from: Date())
+    /// The current measurement as shareable, draggable artifacts — nil until a frame has
+    /// been analysed. Built on the analysed frame, not the live one, so the exported image
+    /// and the exported numbers describe the same beam. Cheap to compute: the encoders
+    /// inside run only when a transfer happens.
+    var currentExport: MeasurementExport? {
+        guard let frame = lastFrame else { return nil }
+        return MeasurementExport(
+            frame: frame,
+            colormap: colormap,
+            displayGain: displayGain,
+            logarithmic: logarithmic,
+            metrics: metrics,
+            micronsPerPixel: settings.micronsPerPixel,
+            source: sourceKind.rawValue,
+            channel: settings.channel.rawValue,
+            noiseSigmaMultiplier: settings.noiseSigmaMultiplier,
+            apertureFactor: settings.apertureFactor,
+            darkFrameSubtracted: hasDarkFrame && settings.subtractDarkFrame,
+            iso: gain.currentISO,
+            shutter: gain.shutterLabel,
+            timestamp: Date()
+        )
     }
 }

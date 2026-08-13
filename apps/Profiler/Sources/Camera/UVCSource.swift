@@ -4,10 +4,11 @@ import Foundation
 
 /// Capture from a UVC device — the a7C in USB Streaming mode, or any webcam.
 ///
-/// macOS exposes no ISO or exposure-duration API for capture devices (`AVCaptureDevice.ISO`
-/// and `setExposureModeCustom` are both `API_UNAVAILABLE(macos)`), so this source reports
-/// gain as advisory only: the servo computes the correction and the UI tells the operator
-/// how many stops to dial in on the camera body.
+/// Neither platform lets this source drive exposure, so gain is advisory only: the servo
+/// computes the correction and the UI tells the operator how many stops to dial in on the
+/// camera body. On macOS there is no API at all (`AVCaptureDevice.ISO` and
+/// `setExposureModeCustom` are both `API_UNAVAILABLE(macos)`); on iOS the API exists but
+/// applies to the built-in cameras, and UVC devices do not advertise custom exposure.
 final class UVCSource: NSObject, FrameSource {
 
     let displayName = "USB video (UVC)"
@@ -20,9 +21,20 @@ final class UVCSource: NSObject, FrameSource {
     private let queue = DispatchQueue(label: "uvc.capture")
     private var selectedDeviceID: String?
 
+    /// On macOS the built-in FaceTime camera is worth offering — it is a real fallback for
+    /// checking the pipeline. On iOS it is not: the iPad's own cameras have fixed lenses and
+    /// would silently stand in for a missing beam camera, so only external UVC devices count.
+    private static let deviceTypes: [AVCaptureDevice.DeviceType] = {
+        #if os(macOS)
+        [.external, .builtInWideAngleCamera]
+        #else
+        [.external]
+        #endif
+    }()
+
     static func availableDevices() -> [(id: String, name: String)] {
         let discovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.external, .builtInWideAngleCamera],
+            deviceTypes: deviceTypes,
             mediaType: .video,
             position: .unspecified
         )
@@ -36,15 +48,19 @@ final class UVCSource: NSObject, FrameSource {
     func start() async throws {
         let granted = await AVCaptureDevice.requestAccess(for: .video)
         guard granted else {
+            #if os(macOS)
+            let where_ = "System Settings › Privacy & Security › Camera"
+            #else
+            let where_ = "Settings › Privacy & Security › Camera"
+            #endif
             throw NSError(
                 domain: "Profiler", code: 1,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "Camera access denied. Grant it in System Settings › Privacy & Security › Camera."]
+                userInfo: [NSLocalizedDescriptionKey: "Camera access denied. Grant it in \(where_)."]
             )
         }
 
         let devices = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.external, .builtInWideAngleCamera],
+            deviceTypes: Self.deviceTypes,
             mediaType: .video,
             position: .unspecified
         ).devices
@@ -109,7 +125,12 @@ final class UVCSource: NSObject, FrameSource {
     }
 
     func gainState() async -> GainState {
-        GainState(
+        #if os(macOS)
+        let limitation = "macOS exposes no ISO control for UVC devices."
+        #else
+        let limitation = "iOS exposes ISO only for its own cameras, not UVC devices."
+        #endif
+        return GainState(
             canReadISO: false,
             canSetISO: false,
             currentISO: nil,
@@ -117,8 +138,8 @@ final class UVCSource: NSObject, FrameSource {
             shutterLabel: nil,
             apertureLabel: nil,
             advisoryOnly: true,
-            note: "macOS exposes no ISO control for UVC devices. "
-                + "Set exposure on the camera body; the servo will tell you which way to go."
+            note: limitation
+                + " Set exposure on the camera body; the servo will tell you which way to go."
         )
     }
 }

@@ -1,19 +1,33 @@
+import CoreGraphics
 import Foundation
+
+/// What the live view needs to render a frame, snapshotted so the render can run off the
+/// main actor without reading UI state.
+struct DisplaySettings {
+    var colormap: Colormap = .inferno
+    var displayGain: Double = 1.0
+    var logarithmic: Bool = false
+}
 
 /// Runs analysis off the main thread and drops frames rather than queueing them.
 ///
-/// Beam profiling wants the *latest* measurement, not every measurement. If analysis
-/// falls behind the capture rate, queueing would grow unbounded latency and show stale
-/// numbers; dropping keeps the display honest about the present.
+/// Two lanes, each latest-wins. The *live* lane renders the colormapped image and the raw
+/// marginal profiles — one pass over the frame — so the picture tracks the capture rate.
+/// The *analysis* lane runs the full ISO 11146 measurement and can lag behind; its results
+/// overlay the live view when they land. Dropping rather than queueing keeps both lanes
+/// honest about the present: a beam profiler wants the latest measurement, not every one.
 final class AnalysisPipeline {
 
     private let queue = DispatchQueue(label: "beam.analysis", qos: .userInitiated)
+    private let liveQueue = DispatchQueue(label: "beam.liveview", qos: .userInteractive)
     private let lock = NSLock()
 
     private var _settings = AnalysisSettings()
+    private var _display = DisplaySettings()
     private var _darkFrame: [Float]?
     private var _frozen = false
     private var busy = false
+    private var liveBusy = false
 
     private var _received = 0
     private var _analysed = 0
@@ -44,12 +58,20 @@ final class AnalysisPipeline {
     private var darkFrameTotal = 0
 
     var onResult: ((BeamFrame, BeamMetrics) -> Void)?
+    /// Fires for every frame the live lane keeps up with: the rendered image and the raw
+    /// marginal profiles, well before the measurement of the same beam exists.
+    var onLiveView: ((CGImage?, [Float], [Float]) -> Void)?
     var onDarkFrameProgress: ((Int, Int) -> Void)?
     var onDarkFrameReady: (() -> Void)?
 
     var settings: AnalysisSettings {
         get { lock.withLock { _settings } }
         set { lock.withLock { _settings = newValue } }
+    }
+
+    var displaySettings: DisplaySettings {
+        get { lock.withLock { _display } }
+        set { lock.withLock { _display = newValue } }
     }
 
     var darkFrame: [Float]? {
@@ -86,17 +108,34 @@ final class AnalysisPipeline {
             lock.unlock()
             return
         }
-        if busy {
-            _dropped += 1
-            lock.unlock()
-            return
-        }
-        busy = true
         let settings = _settings
+        let display = _display
         let dark = _darkFrame
         let collectingDark = darkFramesRemaining > 0
+
+        let takeLive = !liveBusy
+        if takeLive { liveBusy = true }
+        let takeAnalysis = !busy
+        if takeAnalysis { busy = true } else { _dropped += 1 }
         lock.unlock()
 
+        if takeLive {
+            liveQueue.async { [weak self] in
+                guard let self else { return }
+                let image = BeamImageRenderer.makeImage(
+                    frame: frame,
+                    colormap: display.colormap,
+                    displayGain: display.displayGain,
+                    logarithmic: display.logarithmic
+                )
+                let profiles = BeamAnalyzer.quickProfiles(
+                    frame: frame, darkFrame: dark, subtractDark: settings.subtractDarkFrame)
+                self.onLiveView?(image, profiles.x, profiles.y)
+                self.lock.withLock { self.liveBusy = false }
+            }
+        }
+
+        guard takeAnalysis else { return }
         queue.async { [weak self] in
             guard let self else { return }
 

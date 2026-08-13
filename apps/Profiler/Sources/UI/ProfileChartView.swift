@@ -20,13 +20,6 @@ struct ProfileChartView: View {
     var centroid: Double
     var d4Sigma: Double
     var orientation: Orientation
-    var label: String
-    /// Where the image's drawn extent begins along this chart's profile axis, and how long
-    /// it is. The image is aspect-fitted inside its pane, so without these the chart would
-    /// spread the profile across the letterbox margins too and nothing would register with
-    /// the picture above it.
-    var plotStart: CGFloat = 0
-    var plotLength: CGFloat?
     /// Full-scale value for the amplitude axis. Both charts are given the same number so
     /// their heights are directly comparable — with each normalised to its own peak, a
     /// round beam and a 2:1 elliptical one look identical.
@@ -39,18 +32,20 @@ struct ProfileChartView: View {
             guard maxValue > 0 else { return }
 
             let n = profile.count
-            let span = plotLength ?? (orientation == .horizontal ? size.width : size.height)
+            // The pane is sized to the image's fitted extent by the layout, so the profile
+            // spans the full pane and registers with the picture by construction.
+            let span = orientation == .horizontal ? size.width : size.height
 
             // Position along the profile axis; amplitude perpendicular to it.
             // Sampled at pixel centres so the mapping matches how the image is drawn.
             func position(_ index: Double) -> CGFloat {
-                plotStart + CGFloat((index + 0.5) / Double(n)) * span
+                CGFloat((index + 0.5) / Double(n)) * span
             }
             func amplitude(_ value: Double) -> CGFloat {
                 let t = value / maxValue
                 return orientation == .horizontal
-                    ? size.height - CGFloat(t) * (size.height - 4) - 2
-                    : CGFloat(t) * (size.width - 4) + 2
+                    ? size.height - CGFloat(t) * (size.height - 2) - 0.5
+                    : CGFloat(t) * (size.width - 2) + 0.5
             }
             func point(_ index: Double, _ value: Double) -> CGPoint {
                 orientation == .horizontal
@@ -58,38 +53,16 @@ struct ProfileChartView: View {
                     : CGPoint(x: amplitude(value), y: position(index))
             }
 
-            // Baseline, drawn only across the image's extent so the chart reads as
-            // belonging to the picture rather than to the whole pane.
+            // Baseline along the image edge the chart sits against.
             var baseline = Path()
             if orientation == .horizontal {
-                baseline.move(to: CGPoint(x: plotStart, y: size.height - 2))
-                baseline.addLine(to: CGPoint(x: plotStart + span, y: size.height - 2))
+                baseline.move(to: CGPoint(x: 0, y: size.height - 0.5))
+                baseline.addLine(to: CGPoint(x: span, y: size.height - 0.5))
             } else {
-                baseline.move(to: CGPoint(x: 2, y: plotStart))
-                baseline.addLine(to: CGPoint(x: 2, y: plotStart + span))
+                baseline.move(to: CGPoint(x: 0.5, y: 0))
+                baseline.addLine(to: CGPoint(x: 0.5, y: span))
             }
-            context.stroke(baseline, with: .color(.instrumentGridline), lineWidth: 1)
-
-            // D4σ span markers
-            if d4Sigma > 0 {
-                for edge in [centroid - d4Sigma / 2, centroid + d4Sigma / 2] {
-                    guard edge >= 0, edge <= Double(n - 1) else { continue }
-                    var marker = Path()
-                    let p = position(edge)
-                    if orientation == .horizontal {
-                        marker.move(to: CGPoint(x: p, y: 0))
-                        marker.addLine(to: CGPoint(x: p, y: size.height))
-                    } else {
-                        marker.move(to: CGPoint(x: 0, y: p))
-                        marker.addLine(to: CGPoint(x: size.width, y: p))
-                    }
-                    context.stroke(
-                        marker,
-                        with: .color(.orange.opacity(0.5)),
-                        style: StrokeStyle(lineWidth: 1, dash: [3, 3])
-                    )
-                }
-            }
+            context.stroke(baseline, with: .color(.primary.opacity(0.2)), lineWidth: 1)
 
             // Measured profile
             var curve = Path()
@@ -100,7 +73,8 @@ struct ProfileChartView: View {
                 let p = point(Double(i), Double(profile[i]))
                 if first { curve.move(to: p); first = false } else { curve.addLine(to: p) }
             }
-            context.stroke(curve, with: .color(.accentColor), lineWidth: 1.4)
+            // Primary label colour: black data on the light window ground, white on dark.
+            context.stroke(curve, with: .color(.primary), lineWidth: 1.4)
 
             // Gaussian fit
             if let fit, fit.waistRadius > 0 {
@@ -113,19 +87,14 @@ struct ProfileChartView: View {
                     let p = point(Double(i), max(0, value))
                     if !started { fitted.move(to: p); started = true } else { fitted.addLine(to: p) }
                 }
+                // The system highlight colour, as the ellipse is: what is drawn in it is
+                // what the app derived, against the measured data in the primary colour.
                 context.stroke(
                     fitted,
-                    with: .color(.yellow.opacity(0.85)),
+                    with: .color(.accentColor),
                     style: StrokeStyle(lineWidth: 1, dash: [4, 3])
                 )
             }
         }
-        .overlay(alignment: orientation == .horizontal ? .topLeading : .topLeading) {
-            Text(label)
-                .font(.caption2.monospaced())
-                .foregroundStyle(Color.instrumentForeground)
-                .padding(4)
-        }
-        .background(Color.instrumentBackground)
     }
 }
