@@ -24,15 +24,40 @@ struct ContentView: View {
         #endif
     }
 
-    /// Both presentations read the same intent (`showInspector`) but only one is live at a
-    /// time, so a size-class change mid-presentation hands the readout from one container
-    /// to the other instead of losing it.
+    /// Where the metrics readout lives: a trailing column in regular widths, a sheet in
+    /// compact. `nil` while a size-class change is in flight.
+    private enum ReadoutContainer { case column, sheet }
+
+    /// Deliberately not derived from the size class inside the bindings: that flips a
+    /// dismissal and a presentation into the same render pass in which the split view
+    /// collapses, and UIKit's column re-parenting mid-transition then finds view
+    /// controllers where it does not expect them (a crash when narrowing an iPad window).
+    /// Instead `readoutHandoff` retires the old container first, lets the collapse or
+    /// expansion finish undisturbed, and only then raises the readout in its new home.
+    @State private var readoutContainer: ReadoutContainer?
+
     private var inspectorPresented: Binding<Bool> {
-        Binding(get: { showInspector && !isCompact }, set: { showInspector = $0 })
+        Binding(get: { showInspector && readoutContainer == .column },
+                set: { showInspector = $0 })
     }
 
     private var sheetPresented: Binding<Bool> {
-        Binding(get: { showInspector && isCompact }, set: { showInspector = $0 })
+        Binding(get: { showInspector && readoutContainer == .sheet },
+                set: { showInspector = $0 })
+    }
+
+    private func readoutHandoff() async {
+        let target: ReadoutContainer = isCompact ? .sheet : .column
+        guard let current = readoutContainer else {
+            // First appearance: no transition running, adopt the container directly.
+            readoutContainer = target
+            return
+        }
+        guard current != target else { return }
+        readoutContainer = nil
+        try? await Task.sleep(for: .milliseconds(700))
+        guard !Task.isCancelled else { return }
+        readoutContainer = target
     }
 
     var body: some View {
@@ -87,6 +112,9 @@ struct ContentView: View {
         #endif
         .defaultFocus($beamHasFocus, true)
         .task { await model.restoreAndAutostart() }
+        // Re-fires on every width-class change, cancelling a handoff still in its settling
+        // sleep, so rapid resizes keep the readout down until the last transition wins.
+        .task(id: isCompact) { await readoutHandoff() }
     }
 
     /// The run state, where the eye already goes for the window's subject: a dot and one
