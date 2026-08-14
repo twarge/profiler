@@ -63,7 +63,8 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility,
                             preferredCompactColumn: $preferredColumn) {
-            SettingsSidebar(model: model, preferredColumn: $preferredColumn)
+            SettingsSidebar(model: model, preferredColumn: $preferredColumn,
+                            isCollapsed: isCompact)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 300, max: 620)
         } detail: {
             MeasurementView(model: model)

@@ -12,9 +12,10 @@ struct SettingsSidebar: View {
     /// row sets it back to `.detail` because a collapsed sidebar is otherwise a dead end —
     /// the system gives the instrument a back button to here, but nothing pointing forward.
     @Binding var preferredColumn: NavigationSplitViewColumn
-    #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #endif
+    /// Whether the split view is one screen. Passed in from outside the split view: the
+    /// sidebar cannot ask its own environment, because an expanded split view still gives
+    /// its sidebar *column* a compact width — the window's class is the collapse signal.
+    var isCollapsed: Bool
 
     private enum Panel: String {
         case source, gain, calibration, background, display
@@ -23,7 +24,7 @@ struct SettingsSidebar: View {
     var body: some View {
         List {
             #if os(iOS)
-            if horizontalSizeClass == .compact {
+            if isCollapsed {
                 mainViewRow
             }
             #endif
