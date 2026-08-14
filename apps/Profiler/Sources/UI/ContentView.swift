@@ -3,14 +3,42 @@ import SwiftUI
 struct ContentView: View {
     @State private var model = ProfilerModel()
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// Which column a collapsed (iPhone-width) split view shows. Starts on the instrument;
+    /// once the user pops back to the settings list, the sidebar's own top row is the only
+    /// way forward again, and it works by setting this back to `.detail`.
+    @State private var preferredColumn: NavigationSplitViewColumn = .detail
     @State private var showInspector = true
     /// Space pauses only while the instrument pane holds focus, so it stays free for the
     /// sidebar's own controls — where Space is how macOS activates whatever Tab landed on.
     @FocusState private var beamHasFocus: Bool
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
+    /// One screen, so the metrics cannot be a trailing column and present as a sheet.
+    private var isCompact: Bool {
+        #if os(iOS)
+        horizontalSizeClass == .compact
+        #else
+        false
+        #endif
+    }
+
+    /// Both presentations read the same intent (`showInspector`) but only one is live at a
+    /// time, so a size-class change mid-presentation hands the readout from one container
+    /// to the other instead of losing it.
+    private var inspectorPresented: Binding<Bool> {
+        Binding(get: { showInspector && !isCompact }, set: { showInspector = $0 })
+    }
+
+    private var sheetPresented: Binding<Bool> {
+        Binding(get: { showInspector && isCompact }, set: { showInspector = $0 })
+    }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SettingsSidebar(model: model)
+        NavigationSplitView(columnVisibility: $columnVisibility,
+                            preferredCompactColumn: $preferredColumn) {
+            SettingsSidebar(model: model, preferredColumn: $preferredColumn)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 300, max: 620)
         } detail: {
             MeasurementView(model: model)
@@ -24,19 +52,35 @@ struct ContentView: View {
                     model.frozen.toggle()
                     return .handled
                 }
-                .navigationTitle(model.windowTitle)
                 #if os(macOS)
+                .navigationTitle(model.windowTitle)
                 .navigationSubtitle(captureStateSubtitle)
                 #else
-                // In the bar, not floating over the instrument: the camera name is the
-                // window's subject line, not a document heading.
+                // No title on iOS: the camera's name already labels the sidebar row that
+                // leads here, and dropping it frees the full height for the instrument —
+                // the canvas runs to the top edge with the toolbar floating over it.
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.hidden, for: .navigationBar)
                 #endif
                 .toolbar { toolbarContent }
-                .inspector(isPresented: $showInspector) {
+                .inspector(isPresented: inspectorPresented) {
                     MetricsInspector(model: model)
                         .inspectorColumnWidth(min: 210, ideal: 280, max: 480)
                 }
+                #if os(iOS)
+                // In compact widths the readout is a real sheet, not the inspector's own
+                // sheet fallback: that fallback never writes a swipe-dismiss back into its
+                // binding, leaving the toolbar toggle out of phase — pressing it then hides
+                // an already-hidden sheet, and only the second press shows it again.
+                .sheet(isPresented: sheetPresented) {
+                    MetricsInspector(model: model)
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                        // The readout should not silence the instrument behind it: at half
+                        // height the beam stays visible and Pause / Export stay pressable.
+                        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+                }
+                #endif
         }
         #if os(macOS)
         .frame(minWidth: 720, minHeight: 480)
@@ -144,6 +188,11 @@ struct MeasurementView: View {
             #endif
         }
         .background(Color.instrumentCanvas)
+        #if os(iOS)
+        // Run the instrument under the (backgroundless) navigation bar and status bar,
+        // so the beam uses the whole screen height rather than stopping at the bar line.
+        .ignoresSafeArea(.container, edges: .top)
+        #endif
     }
 
     /// The aspect-fitted image/profile block within whatever share of the split it receives.

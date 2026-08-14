@@ -8,6 +8,13 @@ import SwiftUI
 /// the way.
 struct SettingsSidebar: View {
     @Bindable var model: ProfilerModel
+    /// The collapsed split view's visible column. Only written here, never read: the top
+    /// row sets it back to `.detail` because a collapsed sidebar is otherwise a dead end —
+    /// the system gives the instrument a back button to here, but nothing pointing forward.
+    @Binding var preferredColumn: NavigationSplitViewColumn
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
 
     private enum Panel: String {
         case source, gain, calibration, background, display
@@ -15,6 +22,11 @@ struct SettingsSidebar: View {
 
     var body: some View {
         List {
+            #if os(iOS)
+            if horizontalSizeClass == .compact {
+                mainViewRow
+            }
+            #endif
             sourceSection
             gainSection
             calibrationSection
@@ -38,6 +50,36 @@ struct SettingsSidebar: View {
         .tint(Color.accentColor)
         #endif
     }
+
+    // MARK: - Main view (collapsed widths only)
+
+    #if os(iOS)
+    /// The way back to the instrument when the sidebar is the whole screen. Labelled with
+    /// the destination's own title, like any list row that pushes a screen; the manual
+    /// chevron says "navigates" where a Button would otherwise read as an action.
+    private var mainViewRow: some View {
+        Section {
+            Button {
+                preferredColumn = .detail
+            } label: {
+                HStack {
+                    Label {
+                        Text(model.windowTitle)
+                            .foregroundStyle(.primary)
+                    } icon: {
+                        Image(systemName: "camera.metering.center.weighted")
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.forward")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .accessibilityLabel("Show \(model.windowTitle)")
+            .accessibilityHint("Returns to the beam profile view")
+        }
+    }
+    #endif
 
     // MARK: - Source
 
