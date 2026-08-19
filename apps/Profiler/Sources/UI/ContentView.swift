@@ -132,6 +132,27 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        #if os(iOS)
+        // The split view's own reopen toggle never appears while an inspector is attached
+        // to the detail column (attaching the inspector to the split view instead restores
+        // it, but then a hidden readout presents itself at launch anyway and writes `true`
+        // back through its binding — so the readout stays where it is and this button fills
+        // in). Shown only while the sidebar is actually gone: in compact widths the
+        // collapsed stack's back button covers this, and while the sidebar is visible its
+        // own header carries the system toggle. `!= .all` rather than `== .detailOnly`:
+        // if the system ever hands the binding `.automatic` for a hidden sidebar, the
+        // failure is a redundant button, not an unreachable sidebar.
+        if !isCompact, columnVisibility != .all {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    withAnimation { columnVisibility = .all }
+                } label: {
+                    Label("Show Sidebar", systemImage: "sidebar.leading")
+                }
+                .help("Show the settings sidebar")
+            }
+        }
+        #endif
         ToolbarItemGroup(placement: .primaryAction) {
             // Start and stop live beside the Backend picker in the sidebar. Pause stays here:
             // it is used while watching the beam, not while setting the source up.
