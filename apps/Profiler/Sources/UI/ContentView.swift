@@ -46,11 +46,19 @@ struct ContentView: View {
                 set: { showInspector = $0 })
     }
 
+    #if os(iOS)
+    /// The readout sheet opens tall — most of the screen — so the full metrics list is
+    /// readable at a glance; `.medium` stays available as a stop to drag down to when the
+    /// beam behind it matters more. Reset on dismissal so every presentation opens tall.
+    @State private var sheetDetent: PresentationDetent = .large
+    #endif
+
     private func readoutHandoff() async {
         let target: ReadoutContainer = isCompact ? .sheet : .column
         guard let current = readoutContainer else {
             // First appearance: no transition running, adopt the container directly.
             readoutContainer = target
+            lowerReadoutIfSheet(target)
             return
         }
         guard current != target else { return }
@@ -58,6 +66,15 @@ struct ContentView: View {
         try? await Task.sleep(for: .milliseconds(700))
         guard !Task.isCancelled else { return }
         readoutContainer = target
+        lowerReadoutIfSheet(target)
+    }
+
+    /// The sheet never raises itself — at phone widths it covers the whole instrument, so
+    /// launching (or narrowing an iPad window) into it would hide the beam behind numbers.
+    /// It waits for the toolbar's Measurement toggle instead. The column keeps presenting
+    /// on its own: at regular widths the readout sits beside the beam, not over it.
+    private func lowerReadoutIfSheet(_ target: ReadoutContainer) {
+        if target == .sheet { showInspector = false }
     }
 
     var body: some View {
@@ -100,11 +117,13 @@ struct ContentView: View {
                 // an already-hidden sheet, and only the second press shows it again.
                 .sheet(isPresented: sheetPresented) {
                     MetricsInspector(model: model)
-                        .presentationDetents([.medium, .large])
+                        .presentationDetents([.medium, .large], selection: $sheetDetent)
                         .presentationDragIndicator(.visible)
-                        // The readout should not silence the instrument behind it: at half
-                        // height the beam stays visible and Pause / Export stay pressable.
+                        // The readout should not silence the instrument behind it: dragged
+                        // down to half height the beam stays visible and Pause / Export
+                        // stay pressable.
                         .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+                        .onDisappear { sheetDetent = .large }
                 }
                 #endif
         }
