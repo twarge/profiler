@@ -83,6 +83,28 @@ struct ContentView: View {
             SettingsSidebar(model: model, preferredColumn: $preferredColumn,
                             isCollapsed: isCompact)
                 .navigationSplitViewColumnWidth(min: 210, ideal: 300, max: 620)
+                #if os(iOS)
+                // The split view's own toggle comes and goes by rules of its own: with an
+                // inspector attached it usually stays away, but on device — full-screen
+                // landscape at least — it turns up in the detail bar next to the custom
+                // reopen button below, doubling it. Rather than predict it, remove it and
+                // own the pair outright: this button closes the sidebar from its header,
+                // the detail bar's reopens it. Not on macOS, where the system toggle
+                // behaves and the custom pair would fight the native toolbar.
+                .toolbar(removing: .sidebarToggle)
+                .toolbar {
+                    if !isCompact {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                withAnimation { columnVisibility = .detailOnly }
+                            } label: {
+                                Label("Hide Sidebar", systemImage: "sidebar.leading")
+                            }
+                            .help("Hide the settings sidebar")
+                        }
+                    }
+                }
+                #endif
         } detail: {
             MeasurementView(model: model)
                 // No focus ring: the pane is the whole instrument, and a border drawn round
@@ -152,15 +174,12 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         #if os(iOS)
-        // The split view's own reopen toggle never appears while an inspector is attached
-        // to the detail column (attaching the inspector to the split view instead restores
-        // it, but then a hidden readout presents itself at launch anyway and writes `true`
-        // back through its binding — so the readout stays where it is and this button fills
-        // in). Shown only while the sidebar is actually gone: in compact widths the
-        // collapsed stack's back button covers this, and while the sidebar is visible its
-        // own header carries the system toggle. `!= .all` rather than `== .detailOnly`:
-        // if the system ever hands the binding `.automatic` for a hidden sidebar, the
-        // failure is a redundant button, not an unreachable sidebar.
+        // The reopening half of the custom sidebar pair — the system's own toggle is
+        // removed on the sidebar column, see there. Shown only while the sidebar is
+        // actually gone: in compact widths the collapsed stack's back button covers
+        // this. `!= .all` rather than `== .detailOnly`: if the system ever hands the
+        // binding `.automatic` for a hidden sidebar, the failure is a redundant
+        // button, not an unreachable sidebar.
         if !isCompact, columnVisibility != .all {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
