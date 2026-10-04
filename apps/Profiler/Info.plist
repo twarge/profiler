@@ -30,6 +30,15 @@
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>Profiler opens a session with the attached camera. macOS treats the camera's memory card as a removable volume; the app reads live-view frames only and does not read or modify files on the card.</string>
 
+	<!-- Scene lifecycle, one scene: every window would own its own model and try to open
+	     the same camera, so iOS gets the single window macOS has (no New Window there
+	     either). INFOPLIST_KEY_UIApplicationSceneManifest_Generation would declare a
+	     multi-window app, hence the explicit entry. -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations~ipad</key>

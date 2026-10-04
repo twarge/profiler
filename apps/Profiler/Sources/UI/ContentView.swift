@@ -2,6 +2,9 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var model = ProfilerModel()
+    /// Starts with the settings beside the instrument wherever both fit; after that the
+    /// split view owns it. The sidebar buttons move it, and so does a collapse into compact
+    /// width, which leaves `.detailOnly` behind: widening again shows the instrument alone.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     /// Which column a collapsed (iPhone-width) split view shows. Starts on the instrument;
     /// once the user pops back to the settings list, the sidebar's own top row is the only
@@ -36,14 +39,18 @@ struct ContentView: View {
     /// expansion finish undisturbed, and only then raises the readout in its new home.
     @State private var readoutContainer: ReadoutContainer?
 
+    // Each presentation speaks for the readout only while it is the readout's home. The one
+    // a handoff retires reports its own dismissal on the way out — the sheet not until the
+    // column has already taken over — and taking that for the user closing the readout
+    // would leave none at all after widening (or unfolding) with the sheet up.
     private var inspectorPresented: Binding<Bool> {
         Binding(get: { showInspector && readoutContainer == .column },
-                set: { showInspector = $0 })
+                set: { if readoutContainer == .column { showInspector = $0 } })
     }
 
     private var sheetPresented: Binding<Bool> {
         Binding(get: { showInspector && readoutContainer == .sheet },
-                set: { showInspector = $0 })
+                set: { if readoutContainer == .sheet { showInspector = $0 } })
     }
 
     #if os(iOS)
