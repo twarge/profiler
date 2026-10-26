@@ -218,24 +218,36 @@ struct ContentView: View {
                 .help("Clear the retained time-series history")
             }
 
-            if let export = model.currentExport {
-                ShareLink(items: export.shareFiles) { file in
-                    SharePreview(file.filename, icon: file.previewIcon(thumbnail: model.displayImage))
-                } label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
-                }
-                .help("Share the beam image, the profiles, and the metrics")
-            } else {
-                Button {} label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
-                }
-                .disabled(true)
-            }
+            ExportButton(model: model)
 
             Toggle(isOn: $showInspector) {
                 Label("Measurement", systemImage: "sidebar.trailing")
             }
             .help("Show or hide the measurement readout")
+        }
+    }
+}
+
+/// The toolbar's Export button, in a view of its own because it reads the latest analysed
+/// frame. Read from `ContentView`'s body, that made every frame re-run the whole window —
+/// title, subtitle, focus and key handling — and on macOS the Edit and Window menus are
+/// rebuilt from that state, so either one flickered at the frame rate while it was open.
+private struct ExportButton: View {
+    var model: ProfilerModel
+
+    var body: some View {
+        if let export = model.currentExport {
+            ShareLink(items: export.shareFiles) { file in
+                SharePreview(file.filename, icon: file.previewIcon(thumbnail: model.displayImage))
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .help("Share the beam image, the profiles, and the metrics")
+        } else {
+            Button {} label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .disabled(true)
         }
     }
 }
