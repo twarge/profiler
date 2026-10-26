@@ -127,6 +127,7 @@ struct ContentView: View {
                 #if os(macOS)
                 .navigationTitle(model.windowTitle)
                 .navigationSubtitle(captureStateSubtitle)
+                .background(WindowMenuName(name: "\(model.windowTitle) (\(captureState.label))"))
                 #else
                 // No title on iOS: the camera's name already labels the sidebar row that
                 // leads here, and dropping it frees the full height for the instrument —
@@ -166,12 +167,16 @@ struct ContentView: View {
         .task(id: isCompact) { await readoutHandoff() }
     }
 
+    private var captureState: (color: Color, label: String) {
+        model.isRunning
+            ? (model.frozen ? (.orange, "Paused") : (.green, "Capturing"))
+            : (.secondary, "Idle")
+    }
+
     /// The run state, where the eye already goes for the window's subject: a dot and one
     /// word. Green means frames are flowing; the beam view itself is the rest of the story.
     private var captureStateSubtitle: Text {
-        let (color, label): (Color, String) = model.isRunning
-            ? (model.frozen ? (.orange, "Paused") : (.green, "Capturing"))
-            : (.secondary, "Idle")
+        let (color, label) = captureState
         return Text(Image(systemName: "circle.fill"))
             .font(.system(size: 8))
             .foregroundStyle(color)
@@ -227,6 +232,52 @@ struct ContentView: View {
         }
     }
 }
+
+#if os(macOS)
+/// Names the window in the Window menu. Left to AppKit, the name is the title plus a
+/// plain-text copy of the subtitle, in which the subtitle's dot becomes U+FFFC, the
+/// object replacement character: "Synthetic beam (￼ Capturing)".
+private struct WindowMenuName: NSViewRepresentable {
+    var name: String
+
+    func makeNSView(context: Context) -> NameView { NameView() }
+
+    func updateNSView(_ view: NameView, context: Context) {
+        view.name = name
+    }
+
+    final class NameView: NSView {
+        var name = "" { didSet { apply() } }
+        private var observations: [NSKeyValueObservation] = []
+
+        /// AppKit renames the item itself whenever the title or subtitle changes, and
+        /// SwiftUI sets those on passes of its own — at launch, after this view's update
+        /// has already run. So follow the window rather than this view's updates.
+        override func viewDidMoveToWindow() {
+            observations = window.map { window in
+                [window.observe(\.title) { [weak self] _, _ in
+                    MainActor.assumeIsolated { self?.apply() }
+                 },
+                 window.observe(\.subtitle) { [weak self] _, _ in
+                    MainActor.assumeIsolated { self?.apply() }
+                 }]
+            } ?? []
+            apply()
+        }
+
+        // It only names the window; clicks belong to the instrument it sits behind.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        /// Deferred, so it lands after AppKit's own rename has finished.
+        private func apply() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window, !name.isEmpty else { return }
+                NSApp.changeWindowsItem(window, title: name, filename: false)
+            }
+        }
+    }
+}
+#endif
 
 /// The toolbar's Export button, in a view of its own because it reads the latest analysed
 /// frame. Read from `ContentView`'s body, that made every frame re-run the whole window —
