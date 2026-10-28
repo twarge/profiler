@@ -14,6 +14,7 @@ final class UVCSource: NSObject, FrameSource {
     let displayName = "USB video (UVC)"
     var onFrame: ((BeamFrame) -> Void)?
     var onStatus: ((String) -> Void)?
+    var onInterruption: ((SourceInterruption?) -> Void)?
     var measurementChannel: MeasurementChannel = .green
 
     private let session = AVCaptureSession()
@@ -111,6 +112,7 @@ final class UVCSource: NSObject, FrameSource {
         }
         #endif
         session.commitConfiguration()
+        observeInterruptions(of: device)
 
         let sessionRef = session
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
@@ -123,6 +125,8 @@ final class UVCSource: NSObject, FrameSource {
     }
 
     func stop() async {
+        // A stop asked for is not an interruption to report.
+        NotificationCenter.default.removeObserver(self)
         let sessionRef = session
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             queue.async {
@@ -149,6 +153,66 @@ final class UVCSource: NSObject, FrameSource {
             note: limitation
                 + " Set exposure on the camera body; the servo will tell you which way to go."
         )
+    }
+}
+
+// MARK: - Interruptions
+
+extension UVCSource {
+    /// Selector-based observers, which go with the source; `stop` removes them sooner.
+    private func observeInterruptions(of device: AVCaptureDevice) {
+        let center = NotificationCenter.default
+        center.removeObserver(self)
+        center.addObserver(self, selector: #selector(sessionWasInterrupted(_:)),
+                           name: AVCaptureSession.wasInterruptedNotification, object: session)
+        center.addObserver(self, selector: #selector(sessionInterruptionEnded(_:)),
+                           name: AVCaptureSession.interruptionEndedNotification, object: session)
+        center.addObserver(self, selector: #selector(sessionRuntimeError(_:)),
+                           name: AVCaptureSession.runtimeErrorNotification, object: session)
+        center.addObserver(self, selector: #selector(deviceWasDisconnected(_:)),
+                           name: AVCaptureDevice.wasDisconnectedNotification, object: device)
+    }
+
+    @objc private func sessionWasInterrupted(_ note: Notification) {
+        onInterruption?(.paused(Self.reason(for: note)))
+    }
+
+    @objc private func sessionInterruptionEnded(_ note: Notification) {
+        onInterruption?(nil)
+    }
+
+    @objc private func sessionRuntimeError(_ note: Notification) {
+        let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
+        onInterruption?(.ended(
+            "Capture stopped: \(error?.localizedDescription ?? "the session failed.") "
+            + "Press Start to try again."))
+    }
+
+    @objc private func deviceWasDisconnected(_ note: Notification) {
+        let name = (note.object as? AVCaptureDevice)?.localizedName ?? "The camera"
+        onInterruption?(.ended("\(name) was disconnected."))
+    }
+
+    /// What the system says, in terms of what the operator can do about it.
+    private static func reason(for note: Notification) -> String {
+        #if os(iOS)
+        let raw = note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int
+        switch raw.flatMap(AVCaptureSession.InterruptionReason.init(rawValue:)) {
+        case .videoDeviceNotAvailableWithMultipleForegroundApps:
+            // Only on iPads without multitasking camera access; see `start`.
+            return "This iPad pauses USB video while the window shares the screen. "
+                + "Make the window full screen to resume."
+        case .videoDeviceInUseByAnotherClient:
+            return "Another app is using the camera."
+        case .videoDeviceNotAvailableDueToSystemPressure:
+            return "The system paused the camera to let the device cool down."
+        case .videoDeviceNotAvailableInBackground:
+            return "The camera is unavailable while Profiler is in the background."
+        default:
+            break
+        }
+        #endif
+        return "The system paused the camera."
     }
 }
 

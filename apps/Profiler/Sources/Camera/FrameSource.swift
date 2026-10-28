@@ -16,10 +16,21 @@ struct GainState {
     var note: String?
 }
 
+/// Why a running source has stopped delivering frames.
+enum SourceInterruption {
+    /// Frames should resume by themselves once the cause clears; the source keeps going.
+    case paused(String)
+    /// The source has stopped for good, and needs starting again.
+    case ended(String)
+}
+
 protocol FrameSource: AnyObject {
     var displayName: String { get }
     var onFrame: ((BeamFrame) -> Void)? { get set }
     var onStatus: ((String) -> Void)? { get set }
+    /// Frames have stopped, and why; nil once they flow again. Unlike `onStatus`, which is
+    /// the source's running commentary, this is for the operator: it is shown over the beam.
+    var onInterruption: ((SourceInterruption?) -> Void)? { get set }
     var measurementChannel: MeasurementChannel { get set }
 
     func start() async throws

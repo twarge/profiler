@@ -8,6 +8,7 @@ final class PTPSource: FrameSource {
     let displayName = "Sony PC Remote (PTP)"
     var onFrame: ((BeamFrame) -> Void)?
     var onStatus: ((String) -> Void)?
+    var onInterruption: ((SourceInterruption?) -> Void)?
     var measurementChannel: MeasurementChannel = .green
 
     let transport = PTPTransport()
@@ -23,7 +24,7 @@ final class PTPSource: FrameSource {
             self?.onDevicesChanged?(devices)
         }
         transport.onDisconnect = { [weak self] in
-            self?.onStatus?("Camera disconnected.")
+            self?.onInterruption?(.ended("The camera was disconnected."))
             Task { await self?.stop() }
         }
     }
@@ -138,7 +139,7 @@ final class PTPSource: FrameSource {
                     consecutiveFailures = 0
                     if reportedStall {
                         reportedStall = false
-                        self.onStatus?("Live view recovered.")
+                        self.onInterruption?(nil)
                     }
 
                     if let image = Self.decodeJPEG(jpeg),
@@ -150,12 +151,14 @@ final class PTPSource: FrameSource {
                     consecutiveFailures += 1
                     if consecutiveFailures == 3, !reportedStall {
                         reportedStall = true
-                        self.onStatus?(
-                            "Live view not responding: \(error.localizedDescription) "
-                            + "Check that the camera is in PC Remote mode and not in playback.")
+                        self.onInterruption?(.paused(
+                            "Live view isn't responding: \(error.localizedDescription) "
+                            + "Check that the camera is in PC Remote mode and not in playback."))
                     }
                     if consecutiveFailures > 40 {
-                        self.onStatus?("Live view gave up after 40 consecutive failures.")
+                        self.onInterruption?(.ended(
+                            "Live view gave up after 40 failures in a row. "
+                            + "Check the camera, then press Start."))
                         break
                     }
                     // Back off gently and cap it, rather than paying a flat 250 ms for

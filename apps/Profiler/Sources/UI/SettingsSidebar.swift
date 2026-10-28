@@ -448,11 +448,13 @@ struct SettingsSidebar: View {
 
     private var captureStateLabel: String {
         if !model.isRunning { return "Idle" }
+        if model.interruption != nil { return "Interrupted" }
         return model.frozen ? "Paused" : "Capturing"
     }
 
     private var captureStateColor: Color {
         if !model.isRunning { return .secondary }
+        if model.interruption != nil { return .yellow }
         return model.frozen ? .orange : .green
     }
     #endif

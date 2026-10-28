@@ -34,6 +34,7 @@ final class SyntheticSource: FrameSource {
     let displayName = "Synthetic beam"
     var onFrame: ((BeamFrame) -> Void)?
     var onStatus: ((String) -> Void)?
+    var onInterruption: ((SourceInterruption?) -> Void)?
     var measurementChannel: MeasurementChannel = .green
 
     var truth = Truth()

@@ -46,10 +46,15 @@ struct BeamImageView: View {
                 }
                 .allowsHitTesting(false)
 
-                if model.metrics.isSaturated {
-                    saturationBanner
-                        .padding(10)
+                VStack(alignment: .leading, spacing: 8) {
+                    if let reason = model.interruption {
+                        interruptionBanner(reason)
+                    }
+                    if model.metrics.isSaturated {
+                        saturationBanner
+                    }
                 }
+                .padding(10)
             }
         }
     }
@@ -57,6 +62,19 @@ struct BeamImageView: View {
     private var currentImageSize: CGSize {
         guard let image = model.displayImage else { return .zero }
         return CGSize(width: image.width, height: image.height)
+    }
+
+    /// Why the picture has stopped changing, over the picture itself: a frozen beam reads as
+    /// a steady one, and the window's run state is a word in the title bar on the Mac and in
+    /// a collapsible sidebar on the iPad.
+    private func interruptionBanner(_ reason: String) -> some View {
+        Label(reason, systemImage: model.isRunning ? "pause.circle.fill" : "stop.circle.fill")
+            .font(.callout.weight(.medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 8))
+            .foregroundStyle(.white)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var saturationBanner: some View {

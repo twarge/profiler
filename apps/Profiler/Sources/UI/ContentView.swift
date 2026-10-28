@@ -184,9 +184,10 @@ struct ContentView: View {
     }
 
     private var captureState: (color: Color, label: String) {
-        model.isRunning
-            ? (model.frozen ? (.orange, "Paused") : (.green, "Capturing"))
-            : (.secondary, "Idle")
+        if !model.isRunning { return (.secondary, "Idle") }
+        // Before Paused: frames have stopped whether or not the view is also held.
+        if model.interruption != nil { return (.yellow, "Interrupted") }
+        return model.frozen ? (.orange, "Paused") : (.green, "Capturing")
     }
 
     /// The run state, where the eye already goes for the window's subject: a dot and one

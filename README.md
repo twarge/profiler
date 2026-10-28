@@ -56,7 +56,8 @@ worth knowing:
   waiting to be terminated. Returning to the app means connecting again.
 - **USB video stops in a window that shares the screen** — beside another window, or in
   Split View — unless the iPad supports multitasking camera access, as iPads that run Stage
-  Manager with an external display do. Sony PC Remote is not affected.
+  Manager with an external display do. The window says so over the beam, and picks up again
+  once it is full screen. Sony PC Remote is not affected.
 
 ## Camera setup
 

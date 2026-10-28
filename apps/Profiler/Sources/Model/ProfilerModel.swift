@@ -45,6 +45,10 @@ final class ProfilerModel {
     var isRunning = false
     var status = "Idle."
     var errorMessage: String?
+    /// Why frames have stopped arriving: while running, a pause the source expects to
+    /// recover from; once a source has ended by itself, why it did — kept over the last
+    /// frame until the next start, which would otherwise pass for a live one.
+    private(set) var interruption: String?
     /// Rate of frames measured and displayed.
     var fps: Double = 0
     /// Rate of frames arriving from the camera. Divergence from `fps` means analysis is
@@ -727,6 +731,13 @@ final class ProfilerModel {
         newSource.onStatus = { [weak self] text in
             Task { @MainActor in self?.status = text }
         }
+        newSource.onInterruption = { [weak self, weak newSource] interruption in
+            Task { @MainActor in
+                // A report from a source since replaced describes nothing on screen.
+                guard let self, let newSource, self.source === newSource else { return }
+                await self.sourceInterrupted(interruption)
+            }
+        }
 
         source = newSource
 
@@ -752,10 +763,25 @@ final class ProfilerModel {
         }
         source = nil
         isRunning = false
+        interruption = nil
         fps = 0
         captureFPS = 0
         frameTimestamps.removeAll()
         captureRateMark = nil
+    }
+
+    private func sourceInterrupted(_ report: SourceInterruption?) async {
+        switch report {
+        case nil:
+            interruption = nil
+        case let .paused(reason):
+            interruption = reason
+        case let .ended(reason):
+            // Stopped here too, so the window stops saying Capturing and the camera is let
+            // go properly, whatever state the source left it in.
+            await stop()
+            interruption = reason
+        }
     }
 
     func beginPTPDiscovery() {
