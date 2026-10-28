@@ -102,6 +102,14 @@ final class UVCSource: NSObject, FrameSource {
             )
         }
         session.addOutput(output)
+        #if os(iOS)
+        // To AVFoundation, a window sharing the screen — beside another Profiler window, or
+        // in Split View — is multitasking, and without this the camera is cut off the moment
+        // it does. Supported on iPads that run Stage Manager with an external display.
+        if session.isMultitaskingCameraAccessSupported {
+            session.isMultitaskingCameraAccessEnabled = true
+        }
+        #endif
         session.commitConfiguration()
 
         let sessionRef = session

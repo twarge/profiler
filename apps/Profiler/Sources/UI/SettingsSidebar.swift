@@ -84,6 +84,11 @@ struct SettingsSidebar: View {
 
     // MARK: - Source
 
+    /// Marks a camera another window has taken. Listed rather than hidden, so it is plain
+    /// where the camera went. Disabled too, where a platform honours that in a menu; macOS
+    /// does not, and the model turns the choice down there.
+    private static let takenSuffix = " (in another window)"
+
     private var sourceSection: some View {
         CollapsibleListSection(
             isExpanded: $model.expandedSettingsSections[contains: Panel.source.rawValue]
@@ -148,8 +153,11 @@ struct SettingsSidebar: View {
                 } else {
                     Picker("Camera", selection: $model.selectedPTPCameraID) {
                         ForEach(model.ptpCameras) { camera in
-                            Text(camera.name + (camera.acceptsPTP ? "" : " (no PTP)"))
+                            let taken = model.isTakenElsewhere(.ptp, id: camera.id)
+                            Text(camera.name + (camera.acceptsPTP ? "" : " (no PTP)")
+                                + (taken ? Self.takenSuffix : ""))
                                 .tag(Optional(camera.id))
+                                .disabled(taken)
                         }
                     }
                     .disabled(model.isRunning)
@@ -159,7 +167,10 @@ struct SettingsSidebar: View {
                 HStack {
                     Picker("Device", selection: $model.selectedUVCDeviceID) {
                         ForEach(model.uvcDevices) { device in
-                            Text(device.name).tag(Optional(device.id))
+                            let taken = model.isTakenElsewhere(.uvc, id: device.id)
+                            Text(device.name + (taken ? Self.takenSuffix : ""))
+                                .tag(Optional(device.id))
+                                .disabled(taken)
                         }
                     }
                     .disabled(model.isRunning)

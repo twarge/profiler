@@ -31,18 +31,44 @@ private struct StatusBarToggle: View {
 }
 #endif
 
+#if os(iOS)
+/// File › New Window, for a second camera's window. The Mac's menu has one of its own; the
+/// iPad's offers a SwiftUI app only Close. Not on an iPhone, which shows one window.
+private struct NewWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+
+    var body: some View {
+        Button("New Window") { openWindow(id: ProfilerApp.windowID) }
+            .keyboardShortcut("n")
+            .disabled(!supportsMultipleWindows)
+    }
+}
+#endif
+
+/// One window per camera. Each window is an instrument of its own — its own model, source
+/// and settings — so two cameras measure side by side, or as tabs of one window. A new
+/// window comes up set to a camera no other window is using, ready to start.
 struct ProfilerApp: App {
+    /// The window group, for File › New Window on the iPad.
+    static let windowID = "instrument"
+
     var body: some Scene {
-        WindowGroup("Profiler") {
+        WindowGroup("Profiler", id: Self.windowID) {
             ContentView()
         }
         #if os(macOS)
         .windowResizability(.contentMinSize)
         .commands {
-            CommandGroup(replacing: .newItem) {}
             // Lands in the View menu, beside the system's own sidebar toggles.
             CommandGroup(after: .sidebar) {
                 StatusBarToggle()
+            }
+        }
+        #else
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                NewWindowButton()
             }
         }
         #endif

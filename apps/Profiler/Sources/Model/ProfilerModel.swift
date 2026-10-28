@@ -38,6 +38,7 @@ final class ProfilerModel {
         }
         didSet {
             guard sourceKind != oldValue else { return }
+            if !isApplyingProfile { letGoOfCameraTakenElsewhere() }
             switchToCurrentDeviceProfile()
         }
     }
@@ -62,6 +63,12 @@ final class ProfilerModel {
         }
         didSet {
             guard selectedPTPCameraID != oldValue else { return }
+            if refusesTakenCamera(.ptp, selectedPTPCameraID) {
+                isApplyingProfile = true
+                selectedPTPCameraID = oldValue
+                isApplyingProfile = false
+                return
+            }
             // Only reload settings when this selection is the one in play. Discovery
             // adopting a camera while the Synthetic backend is active must not pull the
             // camera's profile over the simulator's, or save one under the other's key.
@@ -78,11 +85,24 @@ final class ProfilerModel {
         }
         didSet {
             guard selectedUVCDeviceID != oldValue else { return }
+            if refusesTakenCamera(.uvc, selectedUVCDeviceID) {
+                isApplyingProfile = true
+                selectedUVCDeviceID = oldValue
+                isApplyingProfile = false
+                return
+            }
             if sourceKind == .uvc { switchToCurrentDeviceProfile() } else { scheduleSave() }
         }
     }
-    /// Start capturing on launch using the remembered backend and camera.
-    var autostart = true { didSet { scheduleSave() } }
+    /// Start capturing on launch using the remembered backend and camera. One setting for the
+    /// app rather than per window, so a change in any window reaches the others.
+    var autostart = true {
+        didSet {
+            guard autostart != oldValue, !isApplyingProfile else { return }
+            for other in Instruments.shared.others(than: self) { other.adoptAutostart(autostart) }
+            scheduleSave()
+        }
+    }
 
     // Analysis
     var settings = AnalysisSettings() {
@@ -209,6 +229,10 @@ final class ProfilerModel {
     }
 
     private var source: FrameSource?
+    /// The start or stop under way. Each waits for the one before it, so a stop issued while
+    /// a camera is still connecting — the window closing during autostart, say — lands once
+    /// the connect has finished instead of racing it, and the connect cannot undo it.
+    private var lifecycle: Task<Void, Never>?
     /// Long-lived, so its ICDeviceBrowser keeps running for the life of the app. A browser
     /// created at Start would not have enumerated anything yet and would fail every time.
     private let ptpSource = PTPSource()
@@ -223,6 +247,15 @@ final class ProfilerModel {
     /// doesn't immediately write them back over themselves.
     private var isApplyingProfile = false
     private var isoRefreshCounter = 0
+    /// Set once the window has settled what it measures (`open`). Until then the model holds
+    /// no camera and saves nothing: its backend is a placeholder, not anybody's choice.
+    private(set) var isOpen = false
+    /// Whether the window took up a remembered camera — the last one used, or its own when
+    /// restored — which autostart then resumes. A window opened beside others only selects
+    /// the next free camera: switching on one nobody asked for, the laptop's own or a
+    /// phone's, is not autostart's to do.
+    private var resumesRememberedCamera = false
+    private let releaseObservers = ObserverTokens()
 
     init() {
         pipeline.settings = settings
@@ -259,14 +292,15 @@ final class ProfilerModel {
                 guard !cameras.isEmpty else { return }
                 if self.selectedPTPCameraID == nil
                     || !cameras.contains(where: { $0.id == self.selectedPTPCameraID }) {
-                    self.selectedPTPCameraID = cameras.first(where: { $0.acceptsPTP })?.id
+                    self.selectedPTPCameraID = cameras.first {
+                        $0.acceptsPTP && !self.isTakenElsewhere(.ptp, id: $0.id)
+                    }?.id
                 }
             }
         }
 
-        restoreAppState()
+        Instruments.shared.join(self)
         ptpSource.beginDiscovery()
-        refreshUVCDevices()
 
         // Release the camera when the app goes away. Without this the session outlives the
         // process and the device stays claimed until it is unplugged.
@@ -282,7 +316,7 @@ final class ProfilerModel {
         ]
         #endif
 
-        for point in releasePoints {
+        releaseObservers.tokens = releasePoints.map { point in
             NotificationCenter.default.addObserver(
                 forName: point,
                 object: nil,
@@ -290,22 +324,167 @@ final class ProfilerModel {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.saveTask?.cancel()
-                    self?.persist()
+                    // Every window sees this at once, so none of them speaks for which camera
+                    // to launch with: that stays with the last one a window chose or started.
+                    self?.persist(includingAppState: false)
                     self?.ptpSource.closeImmediately()
                 }
             }
         }
     }
 
+    /// A window that goes without `endSession` — an iPad scene the system discards — must
+    /// still not leave its camera claimed. The source closes synchronously; nothing here
+    /// can wait for a graceful teardown.
+    deinit {
+        ptpSource.closeImmediately()
+        // A weak member that has gone is dropped on the next change; make one, so other
+        // windows see this camera come free now rather than whenever that happens.
+        Task { @MainActor in Instruments.shared.prune() }
+    }
+
+    // MARK: - Windows
+
+    /// Settles what this window measures, once it is on screen: the camera it had, when the
+    /// system is restoring it; the one used last, when it is the only window; otherwise the
+    /// first camera on that backend no other window has, selected but not started. A new
+    /// window is for another camera, not a second view of one already in use.
+    func open(restoring savedDeviceKey: String?) {
+        guard !isOpen else { return }
+        let state = store.appState
+        let lastKind = SourceKind(rawValue: state.sourceKind) ?? .synthetic
+
+        isApplyingProfile = true
+        autostart = state.autostart
+        if let saved = savedDeviceKey.flatMap(Self.source(fromDeviceKey:)) {
+            resumesRememberedCamera = true
+            sourceKind = saved.kind
+            switch saved.kind {
+            case .ptp: selectedPTPCameraID = saved.id
+            case .uvc: selectedUVCDeviceID = saved.id
+            case .synthetic: break
+            }
+        } else if !Instruments.shared.others(than: self).contains(where: \.isOpen) {
+            resumesRememberedCamera = true
+            sourceKind = lastKind
+            selectedPTPCameraID = state.selectedPTPCameraID
+            selectedUVCDeviceID = state.selectedUVCDeviceID
+        } else {
+            sourceKind = lastKind
+            // This window's browser has not enumerated yet; the others' have.
+            let attached = ptpCameras + Instruments.shared.others(than: self).flatMap(\.ptpCameras)
+            selectedPTPCameraID = attached.first {
+                $0.acceptsPTP && !isTakenElsewhere(.ptp, id: $0.id)
+            }?.id
+            selectedUVCDeviceID = UVCSource.availableDevices().first {
+                !isTakenElsewhere(.uvc, id: $0.id)
+            }?.id
+        }
+        // A restored window can find its camera opened first by a window restored before it.
+        letGoOfCameraTakenElsewhere()
+        isApplyingProfile = false
+        isOpen = true
+        applyProfile(store.profile(for: currentDeviceKey))
+        refreshUVCDevices()
+    }
+
+    /// Trades a choice another window has since taken for the first camera still free. A
+    /// window keeps the camera it last chose on each backend, and switching back to one
+    /// would otherwise leave two windows holding the same camera — each then refusing the
+    /// other's start. Only the selection changes: the caller applies the profile.
+    private func letGoOfCameraTakenElsewhere() {
+        guard let id = selectedDeviceID, isTakenElsewhere(sourceKind, id: id) else { return }
+        let wasApplying = isApplyingProfile
+        isApplyingProfile = true
+        defer { isApplyingProfile = wasApplying }
+        switch sourceKind {
+        case .ptp:
+            selectedPTPCameraID = ptpCameras.first {
+                $0.acceptsPTP && !isTakenElsewhere(.ptp, id: $0.id)
+            }?.id
+        case .uvc:
+            selectedUVCDeviceID = uvcDevices.first { !isTakenElsewhere(.uvc, id: $0.id) }?.id
+        case .synthetic:
+            break
+        }
+    }
+
+    /// The window has closed, so nothing is left showing the measurement: the camera is let
+    /// go, for the other windows and other apps, and the servo stops writing ISO nobody is
+    /// watching.
+    func endSession() async {
+        // This model goes with its window, so a save the debounce is still holding is
+        // written now — the settings only: which camera to launch with is for the windows
+        // still open to say.
+        saveTask?.cancel()
+        persist(includingAppState: false)
+        await stop()
+        Instruments.shared.leave(self)
+    }
+
+    /// The camera this window has taken, which no other window may open: its choice on a
+    /// real backend, once it is open. A synthetic beam is nobody's to take.
+    var heldDeviceKey: String? {
+        guard isOpen, sourceKind != .synthetic, selectedDeviceID != nil else { return nil }
+        return currentDeviceKey
+    }
+
+    func isTakenElsewhere(_ kind: SourceKind, id: String) -> Bool {
+        Instruments.shared.holder(of: Self.deviceKey(kind, id), other: self) != nil
+    }
+
+    /// Whether a camera just chosen is one another window has, which the caller then puts
+    /// back: two windows holding one camera would each refuse the other's start. The picker
+    /// marks such a camera, but macOS lets a marked menu item be chosen all the same.
+    private func refusesTakenCamera(_ kind: SourceKind, _ id: String?) -> Bool {
+        guard sourceKind == kind, !isApplyingProfile, let id, isTakenElsewhere(kind, id: id)
+        else { return false }
+        let name = kind == .ptp
+            ? ptpCameras.first { $0.id == id }?.name
+            : uvcDevices.first { $0.id == id }?.name
+        errorMessage = CameraTaken.this(name ?? "That camera").localizedDescription
+        return true
+    }
+
+    private func adoptAutostart(_ value: Bool) {
+        isApplyingProfile = true
+        autostart = value
+        isApplyingProfile = false
+    }
+
     // MARK: - Persistence
 
     /// Identity of the device the current settings belong to. Synthetic gets its own bucket
     /// so experimenting with the simulator never disturbs a real camera's calibration.
-    var currentDeviceKey: String {
+    var currentDeviceKey: String { Self.deviceKey(sourceKind, selectedDeviceID) }
+
+    private var selectedDeviceID: String? {
         switch sourceKind {
+        case .synthetic: return nil
+        case .ptp: return selectedPTPCameraID
+        case .uvc: return selectedUVCDeviceID
+        }
+    }
+
+    private static func deviceKey(_ kind: SourceKind, _ id: String?) -> String {
+        switch kind {
         case .synthetic: return "synthetic"
-        case .ptp: return "ptp/" + (selectedPTPCameraID ?? "unassigned")
-        case .uvc: return "uvc/" + (selectedUVCDeviceID ?? "unassigned")
+        case .ptp: return "ptp/" + (id ?? "unassigned")
+        case .uvc: return "uvc/" + (id ?? "unassigned")
+        }
+    }
+
+    /// The backend and camera a device key names: the way back from `deviceKey`, for a
+    /// window the system restores with the key it was saved under.
+    private static func source(fromDeviceKey key: String) -> (kind: SourceKind, id: String?)? {
+        if key == deviceKey(.synthetic, nil) { return (.synthetic, nil) }
+        let parts = key.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        let id = parts[1] == "unassigned" ? nil : parts[1]
+        switch parts[0] {
+        case "ptp": return (.ptp, id)
+        case "uvc": return (.uvc, id)
+        default: return nil
         }
     }
 
@@ -345,17 +524,6 @@ final class ProfilerModel {
             return nil
         }
         return preset.pitchMicrons(forFrameWidth: frame.width)
-    }
-
-    private func restoreAppState() {
-        isApplyingProfile = true
-        let state = store.appState
-        sourceKind = SourceKind(rawValue: state.sourceKind) ?? .synthetic
-        selectedPTPCameraID = state.selectedPTPCameraID
-        selectedUVCDeviceID = state.selectedUVCDeviceID
-        autostart = state.autostart
-        isApplyingProfile = false
-        applyProfile(store.profile(for: currentDeviceKey))
     }
 
     private func switchToCurrentDeviceProfile() {
@@ -421,7 +589,10 @@ final class ProfilerModel {
         }
     }
 
-    private func persist() {
+    /// `includingAppState` writes this window's backend and camera as the ones to launch
+    /// with, besides its device's settings.
+    private func persist(includingAppState: Bool = true) {
+        guard isOpen else { return }
         var profile = DeviceProfile()
         profile.deviceName = currentDeviceName
         profile.micronsPerPixel = manualMicronsPerPixel
@@ -450,6 +621,7 @@ final class ProfilerModel {
         profile.expandedMetricSections = expandedMetricSections.sorted()
         store.save(profile, for: currentDeviceKey)
 
+        guard includingAppState else { return }
         var state = store.appState
         state.sourceKind = sourceKind.rawValue
         state.selectedPTPCameraID = selectedPTPCameraID
@@ -465,7 +637,7 @@ final class ProfilerModel {
     /// The wait matters: `ICDeviceBrowser` takes a second or two to report a camera that is
     /// already plugged in, so starting immediately at launch would reliably fail.
     func restoreAndAutostart() async {
-        guard autostart, !isRunning else { return }
+        guard autostart, resumesRememberedCamera, !isRunning else { return }
 
         switch sourceKind {
         case .synthetic:
@@ -484,6 +656,8 @@ final class ProfilerModel {
             status = "Waiting for \(currentDeviceName)…"
             let deadline = Date().addingTimeInterval(12)
             while Date() < deadline {
+                // The window closed while waiting: there is nothing left to start for.
+                guard !Task.isCancelled else { return }
                 let remembered = ptpCameras.first {
                     $0.id == selectedPTPCameraID && $0.acceptsPTP
                 }
@@ -501,9 +675,31 @@ final class ProfilerModel {
 
     // MARK: - Source lifecycle
 
-    func start() async {
+    func start() async { await inTurn { await self.startSource() } }
+
+    func stop() async { await inTurn { await self.stopSource() } }
+
+    private func inTurn(_ step: @escaping @MainActor () async -> Void) async {
+        let previous = lifecycle
+        let current = Task { @MainActor in
+            await previous?.value
+            await step()
+        }
+        lifecycle = current
+        await current.value
+    }
+
+    private func startSource() async {
         errorMessage = nil
-        await stop()
+        await stopSource()
+
+        do {
+            try claimCamera()
+        } catch {
+            errorMessage = error.localizedDescription
+            status = "Failed to start."
+            return
+        }
 
         let newSource: FrameSource
         switch sourceKind {
@@ -550,7 +746,7 @@ final class ProfilerModel {
         }
     }
 
-    func stop() async {
+    private func stopSource() async {
         if let source {
             await source.stop()
         }
@@ -569,7 +765,63 @@ final class ProfilerModel {
 
     func refreshUVCDevices() {
         uvcDevices = UVCSource.availableDevices().map { UVCDeviceInfo(id: $0.id, name: $0.name) }
-        if selectedUVCDeviceID == nil { selectedUVCDeviceID = uvcDevices.first?.id }
+        if selectedUVCDeviceID == nil {
+            selectedUVCDeviceID = uvcDevices.first { !isTakenElsewhere(.uvc, id: $0.id) }?.id
+        }
+    }
+
+    /// Settles the camera a start opens, so that it is never one another window has: this
+    /// window's choice while that is attached, else the first attached camera no window is
+    /// using, which becomes the choice. Left to themselves the sources fall back to the
+    /// first camera attached — with two windows, quite possibly the other window's.
+    private func claimCamera() throws {
+        let attached: [(id: String, name: String, usable: Bool)]
+        switch sourceKind {
+        case .synthetic:
+            return
+        case .ptp:
+            attached = ptpCameras.map { ($0.id, $0.name, $0.acceptsPTP) }
+        case .uvc:
+            refreshUVCDevices()
+            attached = uvcDevices.map { ($0.id, $0.name, true) }
+        }
+        // Nothing attached, or a chosen camera that refuses PTP, is the source's to report.
+        if let chosen = attached.first(where: { $0.id == selectedDeviceID }) {
+            if isTakenElsewhere(sourceKind, id: chosen.id) { throw CameraTaken.this(chosen.name) }
+            return
+        }
+        let usable = attached.filter(\.usable)
+        guard !usable.isEmpty else { return }
+        guard let free = usable.first(where: { !isTakenElsewhere(sourceKind, id: $0.id) }) else {
+            throw CameraTaken.every(sourceKind)
+        }
+        switch sourceKind {
+        case .ptp: selectedPTPCameraID = free.id
+        case .uvc: selectedUVCDeviceID = free.id
+        case .synthetic: break
+        }
+    }
+
+    /// Block-based observers outlive whoever added them unless removed; these go with the
+    /// model, so a window's release hooks do not pile up after it has closed.
+    private final class ObserverTokens {
+        var tokens: [NSObjectProtocol] = []
+        deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
+    }
+
+    private enum CameraTaken: LocalizedError {
+        case this(String)
+        case every(SourceKind)
+
+        var errorDescription: String? {
+            switch self {
+            case let .this(name):
+                return "\(name) is in use in another window."
+            case let .every(kind):
+                let devices = kind == .ptp ? "Sony camera" : "USB video device"
+                return "Every \(devices) attached is in use in another window."
+            }
+        }
     }
 
     // MARK: - Frame handling

@@ -1,9 +1,14 @@
 # Profiler
 
 A native macOS and iPadOS laser beam profiler that uses a Sony α7C — or any UVC camera — as
-the sensor. Profiler is a single-window SwiftUI app: connect a camera and the window shows
-the live beam with integrated horizontal and vertical profiles, ISO 11146 second-moment
-widths, centroid, ellipticity and azimuth, and a closed-loop ISO servo.
+the sensor. Profiler is a SwiftUI app with one window per camera: connect a camera and its
+window shows the live beam with integrated horizontal and vertical profiles, ISO 11146
+second-moment widths, centroid, ellipticity and azimuth, and a closed-loop ISO servo.
+
+Several cameras measure at once, each in a window of its own. A new window — File › New
+Profiler Window on the Mac, File › New Window on the iPad — comes up set to a camera no
+other window is using, ready to start. The source pickers mark a camera another window
+has, and closing a window lets its camera go.
 
 A measurement leaves the app through the toolbar share button — the beam image as PNG,
 both profiles as CSV, and the metrics as JSON — or by dragging the image or either profile
@@ -49,6 +54,9 @@ worth knowing:
 - **Backgrounding ends the session.** iOS takes the USB device away as soon as the app
   leaves the foreground, so the app closes the camera session on the way out rather than
   waiting to be terminated. Returning to the app means connecting again.
+- **USB video stops in a window that shares the screen** — beside another window, or in
+  Split View — unless the iPad supports multitasking camera access, as iPads that run Stage
+  Manager with an external display do. Sony PC Remote is not affected.
 
 ## Camera setup
 
