@@ -3,13 +3,14 @@ import SwiftUI
 struct ContentView: View {
     /// This window's instrument. A window is one camera: a second camera is a second window.
     @State private var model = ProfilerModel()
-    /// The camera this window measures with, kept with the window so that a restored iPad
-    /// scene comes back on its own camera rather than on the last one used. Empty for a
-    /// window the system has not seen before — and, on the Mac, for a restored one too:
-    /// there the window's minimum size has SwiftUI lay it out, and run `onAppear`, before
-    /// it hands back the window's stored values, so a Mac window restored at launch opens
-    /// as a new one would.
-    @SceneStorage("deviceKey.v1") private var savedDeviceKey = ""
+    /// The camera this window measures with: the window's own value, which iPadOS restores
+    /// it with and the Mac reopens it with. Empty for a new window. Not `@SceneStorage`,
+    /// which on the Mac comes back only after `onAppear`; a value given to `openWindow` is
+    /// there from the start.
+    @Binding var deviceKey: String
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
     /// Starts with the settings beside the instrument wherever both fit; after that the
     /// split view owns it. The sidebar buttons move it, and so does a collapse into compact
     /// width, which leaves `.detailOnly` behind: widening again shows the instrument alone.
@@ -172,12 +173,16 @@ struct ContentView: View {
         // Before the autostart below, which needs to know what it is starting: the task's
         // body runs only after this appearance's synchronous work, this included.
         .onAppear {
-            model.open(restoring: savedDeviceKey.isEmpty ? nil : savedDeviceKey)
-            savedDeviceKey = model.currentDeviceKey
+            model.open(restoring: deviceKey.isEmpty ? nil : deviceKey)
+            deviceKey = model.currentDeviceKey
         }
-        .onChange(of: model.currentDeviceKey) { _, key in savedDeviceKey = key }
+        .onChange(of: model.currentDeviceKey) { _, key in deviceKey = key }
         .onDisappear { Task { await model.endSession() } }
         .task { await model.restoreAndAutostart() }
+        #if os(macOS)
+        // After this window's own camera is settled, so it is not opened a second time.
+        .task { Instruments.shared.reopenLastSession { openWindow(value: $0) } }
+        #endif
         // Re-fires on every width-class change, cancelling a handoff still in its settling
         // sleep, so rapid resizes keep the readout down until the last transition wins.
         .task(id: isCompact) { await readoutHandoff() }

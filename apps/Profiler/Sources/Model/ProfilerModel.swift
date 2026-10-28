@@ -254,10 +254,11 @@ final class ProfilerModel {
     /// Set once the window has settled what it measures (`open`). Until then the model holds
     /// no camera and saves nothing: its backend is a placeholder, not anybody's choice.
     private(set) var isOpen = false
-    /// Whether the window took up a remembered camera — the last one used, or its own when
-    /// restored — which autostart then resumes. A window opened beside others only selects
-    /// the next free camera: switching on one nobody asked for, the laptop's own or a
-    /// phone's, is not autostart's to do.
+    /// Whether autostart resumes this window's camera: one that was measuring when the app
+    /// last quit, or — with no record of that — the last one used. A window opened beside
+    /// others only selects the next free camera, and a reopened one that was idle stays
+    /// idle: switching on a camera nobody asked for, the laptop's own or a phone's, is not
+    /// autostart's to do.
     private var resumesRememberedCamera = false
     private let releaseObservers = ObserverTokens()
 
@@ -349,10 +350,11 @@ final class ProfilerModel {
 
     // MARK: - Windows
 
-    /// Settles what this window measures, once it is on screen: the camera it had, when the
-    /// system is restoring it; the one used last, when it is the only window; otherwise the
-    /// first camera on that backend no other window has, selected but not started. A new
-    /// window is for another camera, not a second view of one already in use.
+    /// Settles what this window measures, once it is on screen: the camera it had, when it
+    /// is restored or reopened from the last session; for the first window of a launch, the
+    /// first window's camera from that session, or failing that the one used last; otherwise
+    /// the first camera on that backend no other window has, selected but not started. A
+    /// new window is for another camera, not a second view of one already in use.
     func open(restoring savedDeviceKey: String?) {
         guard !isOpen else { return }
         let state = store.appState
@@ -360,15 +362,20 @@ final class ProfilerModel {
 
         isApplyingProfile = true
         autostart = state.autostart
-        if let saved = savedDeviceKey.flatMap(Self.source(fromDeviceKey:)) {
-            resumesRememberedCamera = true
+        let isFirst = !Instruments.shared.others(than: self).contains(where: \.isOpen)
+        let launchWindow = savedDeviceKey == nil && isFirst
+            ? Instruments.shared.claimLaunchWindow() : nil
+        if let key = savedDeviceKey ?? launchWindow?.deviceKey,
+           let saved = Self.source(fromDeviceKey: key) {
+            // Back on the camera it had, and measuring again only if it was when the app quit.
+            resumesRememberedCamera = Instruments.shared.wasRunningAtLastQuit(key)
             sourceKind = saved.kind
             switch saved.kind {
             case .ptp: selectedPTPCameraID = saved.id
             case .uvc: selectedUVCDeviceID = saved.id
             case .synthetic: break
             }
-        } else if !Instruments.shared.others(than: self).contains(where: \.isOpen) {
+        } else if isFirst {
             resumesRememberedCamera = true
             sourceKind = lastKind
             selectedPTPCameraID = state.selectedPTPCameraID

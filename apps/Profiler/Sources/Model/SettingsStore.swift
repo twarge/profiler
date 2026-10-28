@@ -109,6 +109,15 @@ struct AppState: Codable {
     var selectedPTPCameraID: String?
     var selectedUVCDeviceID: String?
     var autostart: Bool = true
+    /// The windows open when the app last quit on the Mac, in the order they were opened.
+    /// Nil from a build that kept no such list.
+    var openWindows: [OpenWindow]?
+}
+
+/// One window as the app quit with it: what it measured with, and whether it was running.
+struct OpenWindow: Codable {
+    var deviceKey: String
+    var wasRunning: Bool
 }
 
 /// JSON-in-UserDefaults. Small, atomic, and survives the app being force-quit, which a

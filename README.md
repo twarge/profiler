@@ -8,7 +8,8 @@ second-moment widths, centroid, ellipticity and azimuth, and a closed-loop ISO s
 Several cameras measure at once, each in a window of its own. A new window — File › New
 Profiler Window on the Mac, File › New Window on the iPad — comes up set to a camera no
 other window is using, ready to start. The source pickers mark a camera another window
-has, and closing a window lets its camera go.
+has, and closing a window lets its camera go. On the Mac, the windows open at quit come back
+at the next launch, each on its own camera, and those that were measuring start again.
 
 A measurement leaves the app through the toolbar share button — the beam image as PNG,
 both profiles as CSV, and the metrics as JSON — or by dragging the image or either profile
