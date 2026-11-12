@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Twarge LLC
 // SPDX-License-Identifier: Apache-2.0
 //
-// Renders the app icon into the asset catalog:
+// Writes the app icon as an Icon Composer bundle, apps/Profiler/AppIcon.icon:
 //
 //   make icon
 //
@@ -10,19 +10,37 @@
 // ellipse dashed over it. Colormap.swift is compiled in rather than having its anchors
 // copied here, so the icon's colours cannot drift from the app's.
 //
-// The PNGs are committed, so this only needs running when the design changes.
-// Both platforms share one image set: the iOS entry is full-bleed because the
-// system masks it, while the mac entries carry their own rounded body, inset and
-// shadow, which is what the Dock expects.
+// The bundle is icon.json plus one SVG per layer. The asset compiler turns it into
+// every size each platform needs and applies the system's shape and its glass, dark,
+// clear and tinted treatments, so the artwork is full bleed and carries no mask, rim or
+// shadow of its own. Back to front:
+//
+//   fill      the ground the colormaps are designed against
+//   Beam      the Gaussian, flat: a picture on a screen, not an object
+//   Contour   the dashed ellipse, glass, floating over the picture
+//
+// The clear and tinted appearances keep only a layer's brightness, and Turbo's does not
+// rise with intensity: its red core is darker than its yellow, so the beam would show
+// as a ring around a hole the picture never had. Those appearances get the same beam
+// through the Grayscale table instead.
+//
+// The bundle is committed, so this only needs running when the design changes. To look
+// at the result without building:
+//
+//   "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool" \
+//       apps/Profiler/AppIcon.icon --export-image --output-file icon.png \
+//       --platform macOS --rendition Default --width 512 --height 512 --scale 2
+//
+// with Dark, TintedLight, TintedDark, ClearLight or ClearDark for the other renditions.
 
-import CoreGraphics
 import Foundation
-import ImageIO
-import UniformTypeIdentifiers
 
 // MARK: - Design
 
-/// The beam, in unit coordinates over the icon's content area, y downward.
+/// Icon Composer's canvas, in points, y downward.
+let canvas = 1024.0
+
+/// The beam, in unit coordinates over the canvas, y downward.
 struct Beam {
     /// Centred.
     var centerX = 0.5
@@ -38,318 +56,258 @@ struct Beam {
     /// 0.55 is and as any properly exposed beam is, which also keeps the core off the
     /// very top of the Turbo ramp where it turns dark.
     var peak = 0.75
+    /// A display gamma, as the beam view's log option is: it lifts the wings so the
+    /// spot spreads its rainbow over a real area rather than showing as a red core
+    /// with the whole ramp crowded into its edge.
+    var gamma = 0.45
+
+    /// What the beam view would show at `rho`, the distance from the centre in units of
+    /// the 1/e² radius along whichever direction it is measured.
+    func display(_ rho: Double) -> Double {
+        pow(peak * exp(-2 * rho * rho), gamma)
+    }
+
+    /// Opacity has to come from the intensity, not from the colour's own luminance:
+    /// Turbo's ends are both dark, so a luminance rule would punch a hole through the
+    /// middle of the beam. Fully opaque well outside the 1/e² contour and gone soon
+    /// after, which keeps the colours solid to the edge of the spot instead of washing
+    /// them into the ground.
+    static let clearBelow = 0.10
+    static let opaqueAbove = 0.28
+
+    func coverage(_ rho: Double) -> Double {
+        min(1, max(0, (display(rho) - Beam.clearBelow) / (Beam.opaqueAbove - Beam.clearBelow)))
+    }
+
+    /// Where the beam has faded out altogether, in units of the 1/e² radius.
+    var edge: Double {
+        (log(pow(peak, gamma) / Beam.clearBelow) / (2 * gamma)).squareRoot()
+    }
 }
 
 enum Palette {
-    /// Ground, lit from the beam outwards. Close to the measurement area's own
-    /// near-black, which is the ground the colormaps are designed against.
-    static let groundInner: [CGFloat] = [0.086, 0.094, 0.129, 1]
-    static let groundOuter: [CGFloat] = [0.020, 0.024, 0.039, 1]
+    /// Ground, lit from the top down. Close to the measurement area's own near-black,
+    /// which is the ground the colormaps are designed against. Given for the dark
+    /// appearance too, where the system would otherwise swap in its own charcoal.
+    static let groundTop = (0.086, 0.094, 0.129)
+    static let groundBottom = (0.020, 0.024, 0.039)
     /// The contour. White, because Turbo owns every hue it might otherwise have used.
-    static let overlay: [CGFloat] = [1, 1, 1, 1]
-    /// Laid under the contour, so it reads as drawn on top of the beam rather than as
-    /// another band of the colormap.
-    static let overlayShadow: [CGFloat] = [0.020, 0.024, 0.039, 0.55]
-    /// Hairline along the mac body's edge, so it stays a shape on a dark desktop.
-    static let rim: [CGFloat] = [1, 1, 1, 0.10]
+    static let contour = "#FFFFFF"
 }
 
-enum Icon {
-
-    /// Fraction of the mac canvas the icon body occupies, and its corner radius —
-    /// the proportions of Apple's macOS icon grid (824 and 185.4 on a 1024 canvas).
-    static let macBodyFraction = 0.805
-    static let macCornerFraction = 0.2250
-
-    static let space = CGColorSpaceCreateDeviceRGB()
-
-    static func color(_ c: [CGFloat]) -> CGColor { CGColor(colorSpace: space, components: c)! }
-
-    enum Idiom { case mac, ios }
-
-    // MARK: Beam bitmap
-
-    /// The beam, rendered once at a comfortable resolution and scaled into each icon,
-    /// which is what keeps the small sizes smooth.
-    ///
-    /// Row 0 is the top row, matching the y-downward coordinates everything else here
-    /// is written in; `drawGlow` undoes the context flip so it lands that way up.
-    static func beamGlow(resolution: Int, beam: Beam) -> CGImage? {
-        let lut = Colormap.turbo.lookupTable()  // BGRA
-        var bytes = [UInt8](repeating: 0, count: resolution * resolution * 4)
-
-        let theta = -beam.angleDegrees * .pi / 180  // lab CCW → y-downward image coords
-        let cosT = cos(theta)
-        let sinT = sin(theta)
-
-        for py in 0..<resolution {
-            let y = (Double(py) + 0.5) / Double(resolution)
-            for px in 0..<resolution {
-                let x = (Double(px) + 0.5) / Double(resolution)
-                let dx = x - beam.centerX
-                let dy = y - beam.centerY
-                let u = dx * cosT + dy * sinT
-                let v = -dx * sinT + dy * cosT
-                let exponent = -2 * (u * u / (beam.waistX * beam.waistX)
-                    + v * v / (beam.waistY * beam.waistY))
-                let intensity = beam.peak * (exponent > -50 ? exp(exponent) : 0)
-
-                // A display gamma, as the beam view's log option is: it lifts the wings
-                // so the spot spreads its rainbow over a real area rather than showing
-                // as a red core with the whole ramp crowded into its edge.
-                let display = pow(intensity, 0.45)
-                let index = min(255, max(0, Int(display * 255))) * 4
-                let b = Double(lut[index + 0]) / 255
-                let g = Double(lut[index + 1]) / 255
-                let r = Double(lut[index + 2]) / 255
-
-                // Opacity has to come from the intensity, not from the colour's own
-                // luminance: Turbo's ends are both dark, so a luminance rule would punch
-                // a hole through the middle of the beam. Fully opaque well outside the
-                // 1/e² contour and gone soon after, which keeps the colours solid to the
-                // edge of the spot instead of washing them into the ground.
-                let alpha = min(1, max(0, (display - 0.10) / 0.18))
-
-                let o = (py * resolution + px) * 4
-                bytes[o + 0] = UInt8(max(0, min(255, r * 255)))
-                bytes[o + 1] = UInt8(max(0, min(255, g * 255)))
-                bytes[o + 2] = UInt8(max(0, min(255, b * 255)))
-                bytes[o + 3] = UInt8(max(0, min(255, alpha * 255)))
-            }
-        }
-
-        guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
-        return CGImage(
-            width: resolution,
-            height: resolution,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: resolution * 4,
-            space: space,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        )
-    }
-
-    // MARK: Drawing
-
-    static func drawGround(_ ctx: CGContext, in rect: CGRect) {
-        let colors = [color(Palette.groundInner), color(Palette.groundOuter)] as CFArray
-        guard let gradient = CGGradient(colorsSpace: space, colors: colors, locations: [0, 1])
-        else { return }
-        let center = CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.40)
-        ctx.drawRadialGradient(
-            gradient,
-            startCenter: center, startRadius: 0,
-            endCenter: center, endRadius: rect.width * 0.78,
-            options: [.drawsAfterEndLocation]
-        )
-    }
-
-    /// `CGContext.draw` puts an image's first row at the top of the rect *in user
-    /// space*, which in this y-downward context is the bottom of the icon — so the
-    /// beam needs its own flip to come out the way it was generated.
-    static func drawGlow(_ ctx: CGContext, _ glow: CGImage, in rect: CGRect) {
-        ctx.saveGState()
-        ctx.translateBy(x: 0, y: rect.minY + rect.maxY)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(glow, in: rect)
-        ctx.restoreGState()
-    }
-
-    /// Strokes twice, the white line over a wider dark copy of itself, so it stays a white
-    /// line wherever it crosses the beam's own bright bands.
-    static func strokeShadowed(_ ctx: CGContext, _ path: CGPath, lineWidth: CGFloat) {
-        ctx.addPath(path)
-        ctx.setStrokeColor(color(Palette.overlayShadow))
-        ctx.setLineWidth(lineWidth * 1.8)
-        ctx.strokePath()
-
-        ctx.addPath(path)
-        ctx.setStrokeColor(color(Palette.overlay))
-        ctx.setLineWidth(lineWidth)
-        ctx.strokePath()
-    }
-
-    /// The 1/e² contour, where the analyser draws its D4σ ellipse.
-    ///
-    /// Dashed, as the analyser's own axis and span markers are: a dashed contour reads as
-    /// something drawn over the picture, where a solid ring of a colour the beam does not
-    /// contain reads as part of it. The dashes scale with the stroke, so the pattern looks
-    /// the same at every size instead of turning into a dotted line at the small ones.
-    static func drawEllipse(_ ctx: CGContext, in rect: CGRect, beam: Beam, lineWidth: CGFloat) {
-        let center = CGPoint(
-            x: rect.minX + rect.width * beam.centerX,
-            y: rect.minY + rect.height * beam.centerY
-        )
-        var transform = CGAffineTransform.identity
-            .translatedBy(x: center.x, y: center.y)
-            .rotated(by: CGFloat(-beam.angleDegrees * .pi / 180))  // lab CCW → y downward
-        let semiMajor = CGFloat(beam.waistX) * rect.width
-        let semiMinor = CGFloat(beam.waistY) * rect.height
-        let box = CGRect(
-            x: -semiMajor, y: -semiMinor,
-            width: semiMajor * 2, height: semiMinor * 2
-        )
-
-        ctx.saveGState()
-        ctx.setLineCap(.butt)
-        ctx.setLineDash(phase: 0, lengths: [lineWidth * 2.6, lineWidth * 1.9])
-        strokeShadowed(ctx, CGPath(ellipseIn: box, transform: &transform), lineWidth: lineWidth)
-        ctx.restoreGState()
-    }
-
-    static func render(pixels: Int, idiom: Idiom) -> CGImage? {
-        // At 32 px and below the dashed contour collapses into a dotted smear over the
-        // beam, so it drops out rather than turning to mush and the beam carries the icon
-        // on its own — which it can, being the whole picture either way.
-        let detailed = pixels >= 48
-        let beam = Beam()
-        guard let glow = beamGlow(resolution: 768, beam: beam) else { return nil }
-
-        guard let ctx = CGContext(
-            data: nil,
-            width: pixels, height: pixels,
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: space,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        // Work y-downward, matching the beam view's image coordinates.
-        ctx.translateBy(x: 0, y: CGFloat(pixels))
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.setAllowsAntialiasing(true)
-        ctx.interpolationQuality = .high
-
-        let canvas = Double(pixels)
-        // One rect for the ground, the beam and the contour alike. The beam is meant to
-        // run off the edges, so an inset "safe area" would only put a dark border between
-        // it and the crop — and the contour has to stay at the beam's own 1/e² radius,
-        // which it cannot do if the two are laid out in rects of different sizes.
-        let content: CGRect
-        let bodyPath: CGPath
-
-        switch idiom {
-        case .ios:
-            // Full bleed, because iOS and iPadOS mask the icon themselves.
-            content = CGRect(x: 0, y: 0, width: canvas, height: canvas)
-            bodyPath = CGPath(rect: content, transform: nil)
-        case .mac:
-            let side = (canvas * macBodyFraction).rounded()
-            let inset = ((canvas - side) / 2).rounded()
-            content = CGRect(x: inset, y: inset, width: side, height: side)
-            bodyPath = CGPath(
-                roundedRect: content,
-                cornerWidth: side * macCornerFraction,
-                cornerHeight: side * macCornerFraction,
-                transform: nil
-            )
-            // The Dock's icons sit on the shelf rather than floating over it.
-            ctx.saveGState()
-            ctx.setShadow(
-                offset: CGSize(width: 0, height: canvas * 0.010),
-                blur: canvas * 0.020,
-                color: CGColor(colorSpace: space, components: [0, 0, 0, 0.45])!
-            )
-            ctx.addPath(bodyPath)
-            ctx.setFillColor(color(Palette.groundOuter))
-            ctx.fillPath()
-            ctx.restoreGState()
-        }
-
-        ctx.saveGState()
-        ctx.addPath(bodyPath)
-        ctx.clip()
-
-        drawGround(ctx, in: content)
-        drawGlow(ctx, glow, in: content)
-
-        if detailed {
-            drawEllipse(ctx, in: content, beam: beam, lineWidth: max(1, content.width * 0.018))
-        }
-
-        ctx.restoreGState()
-
-        if idiom == .mac, detailed {
-            ctx.addPath(bodyPath)
-            ctx.setStrokeColor(color(Palette.rim))
-            ctx.setLineWidth(max(1, canvas * 0.0035))
-            ctx.strokePath()
-        }
-
-        return ctx.makeImage()
-    }
+enum Contour {
+    /// A dashed contour reads as something drawn over the picture, where a solid ring
+    /// of a colour the beam does not contain reads as part of it. The count is a
+    /// multiple of four and a dash is centred on the major axis, so the pattern closes
+    /// on itself without a seam and a dash sits on each end of both axes.
+    static let dashes = 24
+    /// The share of each period that is dash rather than gap.
+    static let duty = 0.58
+    static let lineWidth = 22.0
 }
 
-// MARK: - Output
+// MARK: - Layers
 
-/// point size, scale — the sizes the Dock, Finder and About box ask for.
-let macEntries: [(points: Int, scale: Int)] = [
-    (16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2),
-    (256, 1), (256, 2), (512, 1), (512, 2),
-]
+func number(_ value: Double, places: Int = 2) -> String {
+    var text = String(format: "%.\(places)f", value)
+    if text.contains(".") {
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+    }
+    return text == "-0" ? "0" : text
+}
 
-func contentsJSON() -> String {
-    var images = [
-        """
-            {
-              "filename" : "ios-1024.png",
-              "idiom" : "universal",
-              "platform" : "ios",
-              "size" : "1024x1024"
-            }
-        """
+func svg(_ body: [String]) -> String {
+    let size = number(canvas)
+    return (["<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"\(size)\" height=\"\(size)\" "
+        + "viewBox=\"0 0 \(size) \(size)\">"]
+        + body.map { "  " + $0 }
+        + ["</svg>", ""]).joined(separator: "\n")
+}
+
+/// The beam as one radial gradient, stretched and turned into the beam's ellipse. Each
+/// stop is looked up in the app's own table the way the beam view looks a pixel up.
+///
+/// The gradient is laid out in user space and carries the whole transform itself. The
+/// plainer way to write this, a turned ellipse filled with a bounding-box gradient, does
+/// not survive Icon Composer: once the shape has a transform it draws the gradient at
+/// about twice its size, and the ellipse ends halfway down the ramp.
+func beamLayer(_ beam: Beam, through colormap: Colormap) -> String {
+    let lut = colormap.lookupTable()  // BGRA
+    let steps = 48
+    let edge = beam.edge
+
+    var body = [
+        "<defs>",
+        "  <radialGradient id=\"beam\" gradientUnits=\"userSpaceOnUse\" cx=\"0\" cy=\"0\" r=\"1\" "
+            + "gradientTransform=\"translate(\(number(beam.centerX * canvas)) "
+            + "\(number(beam.centerY * canvas))) "
+            // Lab angles run counter-clockwise; SVG's run clockwise, y being downward.
+            + "rotate(\(number(-beam.angleDegrees))) "
+            + "scale(\(number(beam.waistX * canvas * edge)) "
+            + "\(number(beam.waistY * canvas * edge)))\">",
     ]
-    for entry in macEntries {
-        images.append(
-            """
-                {
-                  "filename" : "mac-\(entry.points * entry.scale).png",
-                  "idiom" : "mac",
-                  "scale" : "\(entry.scale)x",
-                  "size" : "\(entry.points)x\(entry.points)"
-                }
-            """
+    for step in 0...steps {
+        let offset = Double(step) / Double(steps)
+        let rho = offset * edge
+        let index = min(255, max(0, Int(beam.display(rho) * 255))) * 4
+        let color = String(format: "#%02X%02X%02X", lut[index + 2], lut[index + 1], lut[index])
+        let coverage = step == steps ? 0 : beam.coverage(rho)
+        let opacity = coverage < 1 ? " stop-opacity=\"\(number(coverage, places: 3))\"" : ""
+        body.append(
+            "    <stop offset=\"\(number(offset, places: 4))\" stop-color=\"\(color)\"\(opacity)/>"
         )
     }
+    body += [
+        "  </radialGradient>",
+        "</defs>",
+        "<rect width=\"\(number(canvas))\" height=\"\(number(canvas))\" fill=\"url(#beam)\"/>",
+    ]
+    return svg(body)
+}
+
+/// The 1/e² contour, where the analyser draws its D4σ ellipse, as one arc per dash.
+///
+/// The dashes are laid out by arc length rather than left to `stroke-dasharray`, which
+/// would start the pattern wherever the renderer starts the ellipse and end it with
+/// whatever fraction of a dash is left over.
+func contourLayer(_ beam: Beam) -> String {
+    let a = beam.waistX * canvas
+    let b = beam.waistY * canvas
+    let turn = -beam.angleDegrees * .pi / 180
+    let cx = beam.centerX * canvas
+    let cy = beam.centerY * canvas
+
+    // Arc length along the ellipse against its parameter, tabulated finely enough that
+    // linear interpolation between entries is exact to well under a hundredth of a point.
+    let samples = 7200
+    var lengths = [0.0]
+    lengths.reserveCapacity(samples + 1)
+    var previous = (x: a, y: 0.0)
+    for i in 1...samples {
+        let t = 2 * Double.pi * Double(i) / Double(samples)
+        let point = (x: a * cos(t), y: b * sin(t))
+        lengths.append(lengths[i - 1] + hypot(point.x - previous.x, point.y - previous.y))
+        previous = point
+    }
+    let perimeter = lengths[samples]
+
+    func point(at distance: Double) -> (x: Double, y: Double) {
+        let s = (distance.truncatingRemainder(dividingBy: perimeter) + perimeter)
+            .truncatingRemainder(dividingBy: perimeter)
+        var low = 0
+        var high = samples
+        while high - low > 1 {
+            let middle = (low + high) / 2
+            if lengths[middle] <= s { low = middle } else { high = middle }
+        }
+        let fraction = (s - lengths[low]) / (lengths[high] - lengths[low])
+        let t = 2 * Double.pi * (Double(low) + fraction) / Double(samples)
+        let x = a * cos(t)
+        let y = b * sin(t)
+        return (cx + x * cos(turn) - y * sin(turn), cy + x * sin(turn) + y * cos(turn))
+    }
+
+    let period = perimeter / Double(Contour.dashes)
+    let half = period * Contour.duty / 2
+    let radii = "\(number(a)) \(number(b)) \(number(-beam.angleDegrees))"
+
+    var body = [
+        "<g fill=\"none\" stroke=\"\(Palette.contour)\" "
+            + "stroke-width=\"\(number(Contour.lineWidth))\" stroke-linecap=\"butt\">"
+    ]
+    for dash in 0..<Contour.dashes {
+        let middle = Double(dash) * period
+        let start = point(at: middle - half)
+        let end = point(at: middle + half)
+        body.append(
+            "  <path d=\"M\(number(start.x)) \(number(start.y)) "
+                + "A\(radii) 0 1 \(number(end.x)) \(number(end.y))\"/>"
+        )
+    }
+    body.append("</g>")
+    return svg(body)
+}
+
+// MARK: - Document
+
+func srgb(_ c: (Double, Double, Double)) -> String {
+    String(format: "extended-srgb:%.5f,%.5f,%.5f,1.00000", c.0, c.1, c.2)
+}
+
+/// icon.json, in the layout Icon Composer itself saves. Groups run front to back.
+func document() -> String {
+    let ground = """
+        {
+                "linear-gradient" : [
+                  "\(srgb(Palette.groundTop))",
+                  "\(srgb(Palette.groundBottom))"
+                ]
+              }
+        """
     return """
         {
-          "images" : [
-        \(images.joined(separator: ",\n"))
+          "fill-specializations" : [
+            {
+              "value" : \(ground)
+            },
+            {
+              "appearance" : "dark",
+              "value" : \(ground)
+            }
           ],
-          "info" : {
-            "author" : "make-app-icon",
-            "version" : 1
+          "groups" : [
+            {
+              "layers" : [
+                {
+                  "image-name" : "Contour.svg",
+                  "name" : "Contour"
+                }
+              ],
+              "shadow" : {
+                "kind" : "neutral",
+                "opacity" : 0.5
+              },
+              "translucency" : {
+                "enabled" : false,
+                "value" : 0.5
+              }
+            },
+            {
+              "layers" : [
+                {
+                  "glass" : false,
+                  "image-name-specializations" : [
+                    {
+                      "value" : "Beam.svg"
+                    },
+                    {
+                      "appearance" : "tinted",
+                      "value" : "Beam-Mono.svg"
+                    }
+                  ],
+                  "name" : "Beam"
+                }
+              ],
+              "shadow" : {
+                "kind" : "neutral",
+                "opacity" : 0
+              },
+              "translucency" : {
+                "enabled" : false,
+                "value" : 0.5
+              }
+            }
+          ],
+          "supported-platforms" : {
+            "squares" : "shared"
           }
         }
 
         """
 }
 
-let catalogContentsJSON = """
-    {
-      "info" : {
-        "author" : "make-app-icon",
-        "version" : 1
-      }
-    }
-
-    """
-
-func write(_ image: CGImage, to url: URL) throws {
-    guard let destination = CGImageDestinationCreateWithURL(
-        url as CFURL, UTType.png.identifier as CFString, 1, nil
-    ) else {
-        throw Failure("cannot write \(url.path)")
-    }
-    CGImageDestinationAddImage(destination, image, nil)
-    guard CGImageDestinationFinalize(destination) else {
-        throw Failure("cannot encode \(url.path)")
-    }
-}
+// MARK: - Entry point
 
 struct Failure: LocalizedError {
     let message: String
@@ -357,50 +315,38 @@ struct Failure: LocalizedError {
     var errorDescription: String? { message }
 }
 
-// MARK: - Entry point
-
 @main
 enum MakeAppIcon {
 
     static func main() {
-        let catalog = URL(
+        let bundle = URL(
             fileURLWithPath: CommandLine.arguments.count > 1
                 ? CommandLine.arguments[1]
-                : "apps/Profiler/Assets.xcassets"
+                : "apps/Profiler/AppIcon.icon"
         )
-        let iconSet = catalog.appendingPathComponent("AppIcon.appiconset")
+        let assets = bundle.appendingPathComponent("Assets")
+        let beam = Beam()
+
+        let files: [(URL, String)] = [
+            (assets.appendingPathComponent("Beam.svg"), beamLayer(beam, through: .turbo)),
+            (assets.appendingPathComponent("Beam-Mono.svg"), beamLayer(beam, through: .grayscale)),
+            (assets.appendingPathComponent("Contour.svg"), contourLayer(beam)),
+            (bundle.appendingPathComponent("icon.json"), document()),
+        ]
 
         do {
-            try FileManager.default.createDirectory(
-                at: iconSet, withIntermediateDirectories: true
-            )
-
-            var sizes = Set<Int>()
-            for entry in macEntries {
-                let pixels = entry.points * entry.scale
-                // 32 pt @1x and 16 pt @2x are the same image.
-                guard sizes.insert(pixels).inserted else { continue }
-                guard let image = Icon.render(pixels: pixels, idiom: .mac) else {
-                    throw Failure("cannot render mac \(pixels)")
+            // Start from nothing, so a layer the design no longer has does not linger.
+            if FileManager.default.fileExists(atPath: bundle.path) {
+                try FileManager.default.removeItem(at: bundle)
+            }
+            try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+            for (url, text) in files {
+                guard let data = text.data(using: .utf8) else {
+                    throw Failure("cannot encode \(url.path)")
                 }
-                try write(image, to: iconSet.appendingPathComponent("mac-\(pixels).png"))
+                try data.write(to: url)
             }
-
-            guard let ios = Icon.render(pixels: 1024, idiom: .ios) else {
-                throw Failure("cannot render ios 1024")
-            }
-            try write(ios, to: iconSet.appendingPathComponent("ios-1024.png"))
-
-            try contentsJSON().write(
-                to: iconSet.appendingPathComponent("Contents.json"),
-                atomically: true, encoding: .utf8
-            )
-            try catalogContentsJSON.write(
-                to: catalog.appendingPathComponent("Contents.json"),
-                atomically: true, encoding: .utf8
-            )
-
-            print("==> Wrote \(sizes.count + 1) icons to \(iconSet.path)")
+            print("==> Wrote \(files.count - 1) layers to \(bundle.path)")
         } catch {
             FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
             exit(1)

@@ -81,11 +81,11 @@ vision-sim:
 	  -allowProvisioningUpdates -quiet build
 	@echo "==> Built for visionOS Simulator"
 
-# Redraws the icon into the asset catalog. The PNGs are committed, so this is only
-# needed when the design in the script changes. Colormap.swift is compiled in rather
-# than having its colours copied, so the icon cannot drift from the beam view.
-# The generator runs under the lock: it rewrites PNGs a concurrent build may be
-# signing into the app.
+# Redraws the icon as an Icon Composer bundle, apps/Profiler/AppIcon.icon. The bundle
+# is committed, so this is only needed when the design in the script changes.
+# Colormap.swift is compiled in rather than having its colours copied, so the icon
+# cannot drift from the beam view. The generator runs under the lock: it rewrites
+# files a concurrent build may be compiling into the app.
 icon:
 	@mkdir -p build
 	@swiftc -O -o build/make-app-icon Scripts/make-app-icon.swift \

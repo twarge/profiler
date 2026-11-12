@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="beam" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" gradientTransform="translate(512 512) rotate(-22) scale(620.56 466.22)">
+      <stop offset="0" stop-color="#BC1D07"/>
+      <stop offset="0.0208" stop-color="#BE1F08"/>
+      <stop offset="0.0417" stop-color="#BE1F08"/>
+      <stop offset="0.0625" stop-color="#C02108"/>
+      <stop offset="0.0833" stop-color="#C4250A"/>
+      <stop offset="0.1042" stop-color="#C8290B"/>
+      <stop offset="0.125" stop-color="#CC2C0C"/>
+      <stop offset="0.1458" stop-color="#D2320E"/>
+      <stop offset="0.1667" stop-color="#D8380F"/>
+      <stop offset="0.1875" stop-color="#DE3E11"/>
+      <stop offset="0.2083" stop-color="#E64613"/>
+      <stop offset="0.2292" stop-color="#EE4E16"/>
+      <stop offset="0.25" stop-color="#F1591A"/>
+      <stop offset="0.2708" stop-color="#F3661E"/>
+      <stop offset="0.2917" stop-color="#F57524"/>
+      <stop offset="0.3125" stop-color="#F78429"/>
+      <stop offset="0.3333" stop-color="#F99730"/>
+      <stop offset="0.3542" stop-color="#FBA635"/>
+      <stop offset="0.375" stop-color="#F6B034"/>
+      <stop offset="0.3958" stop-color="#EFBD32"/>
+      <stop offset="0.4167" stop-color="#E9CA30"/>
+      <stop offset="0.4375" stop-color="#E2D62E"/>
+      <stop offset="0.4583" stop-color="#DAE22D"/>
+      <stop offset="0.4792" stop-color="#CBE730"/>
+      <stop offset="0.5" stop-color="#B9ED34"/>
+      <stop offset="0.5208" stop-color="#A7F338"/>
+      <stop offset="0.5417" stop-color="#95F93B"/>
+      <stop offset="0.5625" stop-color="#82FC43"/>
+      <stop offset="0.5833" stop-color="#6DF856"/>
+      <stop offset="0.6042" stop-color="#5CF467"/>
+      <stop offset="0.625" stop-color="#47F07A"/>
+      <stop offset="0.6458" stop-color="#36EC8B"/>
+      <stop offset="0.6667" stop-color="#25E89B"/>
+      <stop offset="0.6875" stop-color="#26DFA8"/>
+      <stop offset="0.7083" stop-color="#28D5B5"/>
+      <stop offset="0.7292" stop-color="#29CCC2" stop-opacity="0.982"/>
+      <stop offset="0.75" stop-color="#2BC2CF" stop-opacity="0.882"/>
+      <stop offset="0.7708" stop-color="#2CBBDA" stop-opacity="0.786"/>
+      <stop offset="0.7917" stop-color="#2DB3E4" stop-opacity="0.695"/>
+      <stop offset="0.8125" stop-color="#31A8E3" stop-opacity="0.607"/>
+      <stop offset="0.8333" stop-color="#349CE1" stop-opacity="0.524"/>
+      <stop offset="0.8542" stop-color="#3791DE" stop-opacity="0.444"/>
+      <stop offset="0.875" stop-color="#3A88DD" stop-opacity="0.369"/>
+      <stop offset="0.8958" stop-color="#3D80DB" stop-opacity="0.298"/>
+      <stop offset="0.9167" stop-color="#3F77D9" stop-opacity="0.231"/>
+      <stop offset="0.9375" stop-color="#426FD7" stop-opacity="0.167"/>
+      <stop offset="0.9583" stop-color="#4466D6" stop-opacity="0.108"/>
+      <stop offset="0.9792" stop-color="#455DCD" stop-opacity="0.052"/>
+      <stop offset="1" stop-color="#4358C3" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#beam)"/>
+</svg>
