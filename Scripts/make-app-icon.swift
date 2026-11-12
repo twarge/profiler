@@ -1,7 +1,8 @@
 // Copyright (C) 2026 Twarge LLC
 // SPDX-License-Identifier: Apache-2.0
 //
-// Writes the app icon as an Icon Composer bundle, apps/Profiler/AppIcon.icon:
+// Writes the app icon: an Icon Composer bundle for macOS and iOS, and a solid image
+// stack for visionOS, which takes nothing from the bundle.
 //
 //   make icon
 //
@@ -10,10 +11,10 @@
 // ellipse dashed over it. Colormap.swift is compiled in rather than having its anchors
 // copied here, so the icon's colours cannot drift from the app's.
 //
-// The bundle is icon.json plus one SVG per layer. The asset compiler turns it into
-// every size each platform needs and applies the system's shape and its glass, dark,
-// clear and tinted treatments, so the artwork is full bleed and carries no mask, rim or
-// shadow of its own. Back to front:
+// The bundle, apps/Profiler/AppIcon.icon, is icon.json plus one SVG per layer. The asset
+// compiler turns it into every size each platform needs and applies the system's shape
+// and its glass, dark, clear and tinted treatments, so the artwork is full bleed and
+// carries no mask, rim or shadow of its own. Back to front:
 //
 //   fill      the ground the colormaps are designed against
 //   Beam      the Gaussian, flat: a picture on a screen, not an object
@@ -24,8 +25,20 @@
 // as a ring around a hole the picture never had. Those appearances get the same beam
 // through the Grayscale table instead.
 //
-// The bundle is committed, so this only needs running when the design changes. To look
-// at the result without building:
+// The stack, apps/Profiler/Assets.xcassets/AppIcon.solidimagestack, is one 1024 px
+// bitmap per layer. visionOS crops them to a circle, sets them apart in depth and lights
+// them. Both icons go by the name AppIcon, and each platform's build takes the one it
+// understands. Back to front:
+//
+//   Back      the ground with the beam on it, opaque
+//   Front     the dashed ellipse
+//
+// The beam is painted onto the back layer rather than given one of its own. visionOS
+// lights and shadows an upper layer along its edge, and the beam has no edge: it fades
+// out. It is the picture here as well, and the contour is what stands off it.
+//
+// Both are committed, so this only needs running when the design changes. To look at
+// the bundle without building:
 //
 //   "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool" \
 //       apps/Profiler/AppIcon.icon --export-image --output-file icon.png \
@@ -33,11 +46,15 @@
 //
 // with Dark, TintedLight, TintedDark, ClearLight or ClearDark for the other renditions.
 
+import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - Design
 
-/// Icon Composer's canvas, in points, y downward.
+/// Icon Composer's canvas, in points, y downward. visionOS asks for layers of as many
+/// pixels, so the bitmaps are drawn in the same coordinates at one pixel to the point.
 let canvas = 1024.0
 
 /// The beam, in unit coordinates over the canvas, y downward.
@@ -92,7 +109,7 @@ enum Palette {
     static let groundTop = (0.086, 0.094, 0.129)
     static let groundBottom = (0.020, 0.024, 0.039)
     /// The contour. White, because Turbo owns every hue it might otherwise have used.
-    static let contour = "#FFFFFF"
+    static let contour = (1.0, 1.0, 1.0)
 }
 
 enum Contour {
@@ -166,60 +183,94 @@ func beamLayer(_ beam: Beam, through colormap: Colormap) -> String {
     return svg(body)
 }
 
-/// The 1/e² contour, where the analyser draws its D4σ ellipse, as one arc per dash.
+/// The 1/e² contour, where the analyser draws its D4σ ellipse, cut into dashes.
 ///
-/// The dashes are laid out by arc length rather than left to `stroke-dasharray`, which
-/// would start the pattern wherever the renderer starts the ellipse and end it with
-/// whatever fraction of a dash is left over.
-func contourLayer(_ beam: Beam) -> String {
-    let a = beam.waistX * canvas
-    let b = beam.waistY * canvas
-    let turn = -beam.angleDegrees * .pi / 180
-    let cx = beam.centerX * canvas
-    let cy = beam.centerY * canvas
+/// The dashes are laid out by arc length rather than left to a dash pattern, which
+/// would start wherever the renderer starts the ellipse and end with whatever fraction
+/// of a dash is left over.
+struct Dashes {
+    /// The ellipse: semi-axes and centre in points, and its turn in radians, clockwise
+    /// as drawn, y being downward.
+    let a: Double
+    let b: Double
+    let turn: Double
+    let cx: Double
+    let cy: Double
+    /// Each dash's two ends as the ellipse's parameter, the start below the end.
+    let spans: [(start: Double, end: Double)]
 
-    // Arc length along the ellipse against its parameter, tabulated finely enough that
-    // linear interpolation between entries is exact to well under a hundredth of a point.
-    let samples = 7200
-    var lengths = [0.0]
-    lengths.reserveCapacity(samples + 1)
-    var previous = (x: a, y: 0.0)
-    for i in 1...samples {
-        let t = 2 * Double.pi * Double(i) / Double(samples)
-        let point = (x: a * cos(t), y: b * sin(t))
-        lengths.append(lengths[i - 1] + hypot(point.x - previous.x, point.y - previous.y))
-        previous = point
-    }
-    let perimeter = lengths[samples]
+    init(_ beam: Beam) {
+        let a = beam.waistX * canvas
+        let b = beam.waistY * canvas
+        self.a = a
+        self.b = b
+        turn = -beam.angleDegrees * .pi / 180
+        cx = beam.centerX * canvas
+        cy = beam.centerY * canvas
 
-    func point(at distance: Double) -> (x: Double, y: Double) {
-        let s = (distance.truncatingRemainder(dividingBy: perimeter) + perimeter)
-            .truncatingRemainder(dividingBy: perimeter)
-        var low = 0
-        var high = samples
-        while high - low > 1 {
-            let middle = (low + high) / 2
-            if lengths[middle] <= s { low = middle } else { high = middle }
+        // Arc length along the ellipse against its parameter, tabulated finely enough
+        // that linear interpolation between entries is exact to well under a hundredth
+        // of a point.
+        let samples = 7200
+        var lengths = [0.0]
+        lengths.reserveCapacity(samples + 1)
+        var previous = (x: a, y: 0.0)
+        for i in 1...samples {
+            let t = 2 * Double.pi * Double(i) / Double(samples)
+            let point = (x: a * cos(t), y: b * sin(t))
+            lengths.append(lengths[i - 1] + hypot(point.x - previous.x, point.y - previous.y))
+            previous = point
         }
-        let fraction = (s - lengths[low]) / (lengths[high] - lengths[low])
-        let t = 2 * Double.pi * (Double(low) + fraction) / Double(samples)
+        let perimeter = lengths[samples]
+
+        /// Not wrapped into one turn: a dash that straddles the start of the ellipse
+        /// begins at a negative parameter, so its start stays below its end.
+        func parameter(at distance: Double) -> Double {
+            let turns = (distance / perimeter).rounded(.down)
+            let s = distance - turns * perimeter
+            var low = 0
+            var high = samples
+            while high - low > 1 {
+                let middle = (low + high) / 2
+                if lengths[middle] <= s { low = middle } else { high = middle }
+            }
+            let fraction = (s - lengths[low]) / (lengths[high] - lengths[low])
+            return 2 * Double.pi * (turns + (Double(low) + fraction) / Double(samples))
+        }
+
+        let period = perimeter / Double(Contour.dashes)
+        let half = period * Contour.duty / 2
+        spans = (0..<Contour.dashes).map { dash in
+            let middle = Double(dash) * period
+            return (parameter(at: middle - half), parameter(at: middle + half))
+        }
+    }
+
+    func point(_ t: Double) -> (x: Double, y: Double) {
         let x = a * cos(t)
         let y = b * sin(t)
         return (cx + x * cos(turn) - y * sin(turn), cy + x * sin(turn) + y * cos(turn))
     }
+}
 
-    let period = perimeter / Double(Contour.dashes)
-    let half = period * Contour.duty / 2
-    let radii = "\(number(a)) \(number(b)) \(number(-beam.angleDegrees))"
+/// The contour as one arc per dash.
+func contourLayer(_ beam: Beam) -> String {
+    let dashes = Dashes(beam)
+    let radii = "\(number(dashes.a)) \(number(dashes.b)) \(number(-beam.angleDegrees))"
+    let stroke = String(
+        format: "#%02X%02X%02X",
+        Int((Palette.contour.0 * 255).rounded()),
+        Int((Palette.contour.1 * 255).rounded()),
+        Int((Palette.contour.2 * 255).rounded())
+    )
 
     var body = [
-        "<g fill=\"none\" stroke=\"\(Palette.contour)\" "
+        "<g fill=\"none\" stroke=\"\(stroke)\" "
             + "stroke-width=\"\(number(Contour.lineWidth))\" stroke-linecap=\"butt\">"
     ]
-    for dash in 0..<Contour.dashes {
-        let middle = Double(dash) * period
-        let start = point(at: middle - half)
-        let end = point(at: middle + half)
+    for span in dashes.spans {
+        let start = dashes.point(span.start)
+        let end = dashes.point(span.end)
         body.append(
             "  <path d=\"M\(number(start.x)) \(number(start.y)) "
                 + "A\(radii) 0 1 \(number(end.x)) \(number(end.y))\"/>"
@@ -307,6 +358,183 @@ func document() -> String {
         """
 }
 
+// MARK: - visionOS layers
+
+let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
+
+/// The back layer: the ground with the beam on it, opaque. Each pixel is worked out the
+/// way the beam view works one out, which is the picture the vector layer's gradient
+/// stands in for.
+func pictureLayer(_ beam: Beam, through colormap: Colormap) -> CGImage? {
+    let lut = colormap.lookupTable()  // BGRA
+    let size = Int(canvas)
+    var bytes = [UInt8](repeating: 255, count: size * size * 4)
+
+    let turn = -beam.angleDegrees * .pi / 180  // lab CCW → y-downward image coords
+    let cosT = cos(turn)
+    let sinT = sin(turn)
+    let top = [Palette.groundTop.0, Palette.groundTop.1, Palette.groundTop.2]
+    let bottom = [Palette.groundBottom.0, Palette.groundBottom.1, Palette.groundBottom.2]
+
+    for py in 0..<size {
+        let y = (Double(py) + 0.5) / canvas
+        let ground = (0..<3).map { top[$0] + (bottom[$0] - top[$0]) * y }
+        for px in 0..<size {
+            let dx = (Double(px) + 0.5) / canvas - beam.centerX
+            let dy = y - beam.centerY
+            let u = (dx * cosT + dy * sinT) / beam.waistX
+            let v = (-dx * sinT + dy * cosT) / beam.waistY
+            let rho = (u * u + v * v).squareRoot()
+            let coverage = beam.coverage(rho)
+
+            // Between the table's entries, so that its 256 colours do not show as rings
+            // at this size.
+            let position = min(255, max(0, beam.display(rho) * 255))
+            let index = min(254, Int(position))
+            let fraction = position - Double(index)
+
+            let o = (py * size + px) * 4
+            for channel in 0..<3 {
+                let low = Double(lut[index * 4 + 2 - channel])
+                let high = Double(lut[index * 4 + 6 - channel])
+                let color = (low + (high - low) * fraction) / 255
+                let value = ground[channel] + (color - ground[channel]) * coverage
+                bytes[o + channel] = UInt8((min(1, max(0, value)) * 255).rounded())
+            }
+        }
+    }
+
+    guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
+    return CGImage(
+        width: size,
+        height: size,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: size * 4,
+        space: sRGB,
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: true,
+        intent: .defaultIntent
+    )
+}
+
+/// The front layer: the dashes on nothing. No shadow or dark edge of their own, since
+/// visionOS casts the shadow of an upper layer itself.
+func contourImage(_ beam: Beam) -> CGImage? {
+    let size = Int(canvas)
+    guard let context = CGContext(
+        data: nil,
+        width: size,
+        height: size,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: sRGB,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+
+    // y downward, as the vector layers are.
+    context.translateBy(x: 0, y: canvas)
+    context.scaleBy(x: 1, y: -1)
+
+    // The unit circle onto the ellipse. Only the path goes through it, so the stroke
+    // keeps one width all the way round.
+    let dashes = Dashes(beam)
+    let onto = CGAffineTransform(translationX: dashes.cx, y: dashes.cy)
+        .rotated(by: dashes.turn)
+        .scaledBy(x: dashes.a, y: dashes.b)
+    let path = CGMutablePath()
+    for span in dashes.spans {
+        path.move(to: CGPoint(x: cos(span.start), y: sin(span.start)), transform: onto)
+        path.addArc(
+            center: .zero, radius: 1,
+            startAngle: span.start, endAngle: span.end, clockwise: false,
+            transform: onto
+        )
+    }
+
+    let color = [Palette.contour.0, Palette.contour.1, Palette.contour.2, 1].map { CGFloat($0) }
+    context.setStrokeColor(CGColor(colorSpace: sRGB, components: color)!)
+    context.setLineWidth(Contour.lineWidth)
+    context.setLineCap(.butt)
+    context.addPath(path)
+    context.strokePath()
+    return context.makeImage()
+}
+
+// MARK: - Asset catalog
+
+/// A Contents.json as Xcode saves one, its keys in alphabetical order: `images` goes
+/// before `info` and `layers` after it.
+func catalogContents(images: String? = nil, layers: String? = nil) -> String {
+    let info = [
+        "  \"info\" : {",
+        "    \"author\" : \"xcode\",",
+        "    \"version\" : 1",
+        "  }",
+    ].joined(separator: "\n")
+    return "{\n" + [images, info, layers].compactMap { $0 }.joined(separator: ",\n") + "\n}\n"
+}
+
+/// A solid image stack, in the layout Xcode itself saves: a folder per layer, front to
+/// back, each holding an image set with the one bitmap, 1024 px declared as 512 pt at 2x.
+func writeStack(_ layers: [(name: String, image: CGImage)], to stack: URL) throws {
+    let files = FileManager.default
+    try files.createDirectory(at: stack, withIntermediateDirectories: true)
+
+    let list = layers.map { layer in
+        [
+            "    {",
+            "      \"filename\" : \"\(layer.name).solidimagestacklayer\"",
+            "    }",
+        ].joined(separator: "\n")
+    }.joined(separator: ",\n")
+    try write(
+        catalogContents(layers: "  \"layers\" : [\n\(list)\n  ]"),
+        to: stack.appendingPathComponent("Contents.json")
+    )
+
+    for layer in layers {
+        let folder = stack.appendingPathComponent("\(layer.name).solidimagestacklayer")
+        let imageSet = folder.appendingPathComponent("Content.imageset")
+        try files.createDirectory(at: imageSet, withIntermediateDirectories: true)
+        try write(catalogContents(), to: folder.appendingPathComponent("Contents.json"))
+
+        let images = [
+            "  \"images\" : [",
+            "    {",
+            "      \"filename\" : \"\(layer.name).png\",",
+            "      \"idiom\" : \"vision\",",
+            "      \"scale\" : \"2x\"",
+            "    }",
+            "  ]",
+        ].joined(separator: "\n")
+        try write(
+            catalogContents(images: images),
+            to: imageSet.appendingPathComponent("Contents.json")
+        )
+
+        let png = imageSet.appendingPathComponent("\(layer.name).png")
+        guard let destination = CGImageDestinationCreateWithURL(
+            png as CFURL, UTType.png.identifier as CFString, 1, nil
+        ) else {
+            throw Failure("cannot write \(png.path)")
+        }
+        CGImageDestinationAddImage(destination, layer.image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw Failure("cannot encode \(png.path)")
+        }
+    }
+}
+
+func write(_ text: String, to url: URL) throws {
+    guard let data = text.data(using: .utf8) else {
+        throw Failure("cannot encode \(url.path)")
+    }
+    try data.write(to: url)
+}
+
 // MARK: - Entry point
 
 struct Failure: LocalizedError {
@@ -319,15 +547,18 @@ struct Failure: LocalizedError {
 enum MakeAppIcon {
 
     static func main() {
-        let bundle = URL(
+        let app = URL(
             fileURLWithPath: CommandLine.arguments.count > 1
                 ? CommandLine.arguments[1]
-                : "apps/Profiler/AppIcon.icon"
+                : "apps/Profiler"
         )
+        let bundle = app.appendingPathComponent("AppIcon.icon")
         let assets = bundle.appendingPathComponent("Assets")
+        let catalog = app.appendingPathComponent("Assets.xcassets")
+        let stack = catalog.appendingPathComponent("AppIcon.solidimagestack")
         let beam = Beam()
 
-        let files: [(URL, String)] = [
+        let vectors: [(URL, String)] = [
             (assets.appendingPathComponent("Beam.svg"), beamLayer(beam, through: .turbo)),
             (assets.appendingPathComponent("Beam-Mono.svg"), beamLayer(beam, through: .grayscale)),
             (assets.appendingPathComponent("Contour.svg"), contourLayer(beam)),
@@ -335,18 +566,35 @@ enum MakeAppIcon {
         ]
 
         do {
+            let files = FileManager.default
+
             // Start from nothing, so a layer the design no longer has does not linger.
-            if FileManager.default.fileExists(atPath: bundle.path) {
-                try FileManager.default.removeItem(at: bundle)
+            if files.fileExists(atPath: bundle.path) {
+                try files.removeItem(at: bundle)
             }
-            try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
-            for (url, text) in files {
-                guard let data = text.data(using: .utf8) else {
-                    throw Failure("cannot encode \(url.path)")
-                }
-                try data.write(to: url)
+            try files.createDirectory(at: assets, withIntermediateDirectories: true)
+            for (url, text) in vectors {
+                try write(text, to: url)
             }
-            print("==> Wrote \(files.count - 1) layers to \(bundle.path)")
+            print("==> Wrote \(vectors.count - 1) layers to \(bundle.path)")
+
+            guard let picture = pictureLayer(beam, through: .turbo),
+                let contour = contourImage(beam)
+            else {
+                throw Failure("cannot draw the visionOS layers")
+            }
+            // The catalog may come to hold other things; only the stack is replaced.
+            if files.fileExists(atPath: stack.path) {
+                try files.removeItem(at: stack)
+            }
+            try files.createDirectory(at: catalog, withIntermediateDirectories: true)
+            let contents = catalog.appendingPathComponent("Contents.json")
+            if !files.fileExists(atPath: contents.path) {
+                try write(catalogContents(), to: contents)
+            }
+            let layers = [(name: "Front", image: contour), (name: "Back", image: picture)]
+            try writeStack(layers, to: stack)
+            print("==> Wrote \(layers.count) layers to \(stack.path)")
         } catch {
             FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
             exit(1)
