@@ -101,6 +101,7 @@ enum SelfTest {
         }
 
         failures += exportChecks(width: width, height: height)
+        failures += RemoteLoopbackTest.run()
 
         print("")
         print(String(repeating: "─", count: 78))

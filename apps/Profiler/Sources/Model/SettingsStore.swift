@@ -47,6 +47,9 @@ struct DeviceProfile: Codable {
     /// watching is a property of the setup: drift on a bench beam, ISO on a camera whose
     /// servo is hunting.
     var plottedQuantities: [PlotQuantity] = []
+
+    /// Publish this camera's window on the local network for other devices to watch.
+    var publishOnNetwork: Bool = false
 }
 
 extension DeviceProfile {
@@ -92,6 +95,7 @@ extension DeviceProfile {
             .expandedSettingsSections, fresh.expandedSettingsSections)
         expandedMetricSections = stored.value(
             .expandedMetricSections, fresh.expandedMetricSections)
+        publishOnNetwork = stored.value(.publishOnNetwork, fresh.publishOnNetwork)
     }
 }
 
@@ -108,6 +112,7 @@ struct AppState: Codable {
     var sourceKind: String = ProfilerModel.SourceKind.synthetic.rawValue
     var selectedPTPCameraID: String?
     var selectedUVCDeviceID: String?
+    var selectedRemoteName: String?
     var autostart: Bool = true
     /// The windows open when the app last quit on the Mac, in the order they were opened.
     /// Nil from a build that kept no such list.

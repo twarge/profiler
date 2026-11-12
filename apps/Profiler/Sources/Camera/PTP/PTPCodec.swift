@@ -1,3 +1,6 @@
+// Left out of the visionOS build, which has no camera backends: it measures through a
+// publishing Mac (`RemoteSource`).
+#if !os(visionOS)
 import Foundation
 
 enum PTPError: Error, LocalizedError {
@@ -226,3 +229,4 @@ struct PTPWriter {
 
     mutating func append(_ other: Data) { data.append(other) }
 }
+#endif

@@ -7,7 +7,7 @@ import Foundation
 /// flat top gives D4σ > 2w. ISO 11146 mandates the second moment; the fit is diagnostic.
 enum GaussianFit {
 
-    struct Result {
+    struct Result: Equatable, Codable {
         var amplitude: Double
         var center: Double
         /// 1/e² radius in pixels.

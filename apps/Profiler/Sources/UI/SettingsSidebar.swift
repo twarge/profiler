@@ -18,8 +18,12 @@ struct SettingsSidebar: View {
     var isCollapsed: Bool
 
     private enum Panel: String {
-        case source, gain, calibration, background, display
+        case source, gain, calibration, background, display, sharing
     }
+
+    /// A window on a remote publisher shows that publisher's measurement, so the settings
+    /// that shape a measurement — and the picture it comes with — are not here to change.
+    private var isRemote: Bool { model.sourceKind == .remote }
 
     var body: some View {
         List {
@@ -32,8 +36,11 @@ struct SettingsSidebar: View {
             gainSection
             calibrationSection
             displaySection
-            backgroundSection
-            #if os(iOS)
+            if !isRemote {
+                backgroundSection
+                sharingSection
+            }
+            #if !os(macOS)
             if model.isRunning {
                 fpsRow
             }
@@ -98,7 +105,7 @@ struct SettingsSidebar: View {
             // is disabled by the same running state that flips this button to Stop.
             HStack {
                 Picker("Backend", selection: $model.sourceKind) {
-                    ForEach(ProfilerModel.SourceKind.allCases) { kind in
+                    ForEach(ProfilerModel.SourceKind.available) { kind in
                         Text(kind.rawValue).tag(kind)
                     }
                 }
@@ -121,7 +128,7 @@ struct SettingsSidebar: View {
                 .help(model.isRunning ? "Stop capture" : "Start capture")
             }
 
-            #if os(iOS)
+            #if !os(macOS)
             // iOS has no window subtitle, so the compact capture state lives with the
             // backend that owns it. Operational chatter such as auto-gain adjustments is
             // deliberately omitted here; the current ISO is already visible in Gain / ISO.
@@ -185,16 +192,26 @@ struct SettingsSidebar: View {
                     .help("Rescan for USB video devices")
                 }
 
+            case .remote:
+                remotePublisherRows
+
             case .synthetic:
                 EmptyView()
             }
 
-            Picker("Channel", selection: $model.settings.channel) {
-                ForEach(MeasurementChannel.allCases) { channel in
-                    Text(channel.rawValue).tag(channel)
+            if isRemote {
+                LabeledContent("Channel") {
+                    Text(model.remoteState?.channel.rawValue ?? "—")
                 }
+                .help("The channel the publisher measures on.")
+            } else {
+                Picker("Channel", selection: $model.settings.channel) {
+                    ForEach(MeasurementChannel.allCases) { channel in
+                        Text(channel.rawValue).tag(channel)
+                    }
+                }
+                .help(model.settings.channel.detail)
             }
-            .help(model.settings.channel.detail)
 
             if let error = model.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -203,6 +220,47 @@ struct SettingsSidebar: View {
             }
         } header: {
             Text("Source")
+        }
+    }
+
+    /// Publishers found on the local network. The one chosen stays listed while it is out
+    /// of sight — asleep, or not yet found — because the link keeps trying for it by name.
+    @ViewBuilder
+    private var remotePublisherRows: some View {
+        let found = model.remotePublishers
+        let missing = model.selectedRemoteName.flatMap { name in
+            found.contains { $0.name == name } ? nil : name
+        }
+        if found.isEmpty, missing == nil {
+            Text("Searching…")
+                .foregroundStyle(.secondary)
+            Text("On the Mac or iPad that has the camera, turn on Publish on Network "
+                 + "under Sharing in that camera's window.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Picker("Publisher", selection: $model.selectedRemoteName) {
+                ForEach(found) { publisher in
+                    Text(publisher.name).tag(Optional(publisher.name))
+                }
+                if let missing {
+                    Text(missing + " (not found)").tag(Optional(missing))
+                }
+            }
+            .disabled(model.isRunning)
+        }
+        if model.remoteNeedsPasscode || !model.remotePasscode.isEmpty {
+            LabeledContent("Passcode") {
+                SecureField("", text: $model.remotePasscode)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 140)
+                    .disabled(model.isRunning)
+            }
+            .help("The passcode set where this source is published.")
+        }
+        if let source = model.remoteState?.sourceName {
+            LabeledContent("Camera") { Text(source) }
         }
     }
 
@@ -226,9 +284,11 @@ struct SettingsSidebar: View {
                         }
                     }
                     .labelsHidden()
-                    .disabled(model.autoGainEnabled)
-                    .help(model.autoGainEnabled
-                          ? "Turn the auto-gain servo off to set the ISO by hand."
+                    .disabled(model.isoIsServoDriven)
+                    .help(model.isoIsServoDriven
+                          ? (isRemote
+                             ? "The publisher's auto-gain servo is setting the ISO."
+                             : "Turn the auto-gain servo off to set the ISO by hand.")
                           : "Set the camera's ISO.")
                 } else {
                     Text(model.gain.currentISO.map(String.init) ?? "—")
@@ -240,13 +300,20 @@ struct SettingsSidebar: View {
                 LabeledContent("Shutter") { Text(shutter).monospacedDigit() }
             }
 
-            Toggle("Auto-Gain Servo", isOn: $model.autoGainEnabled)
-                .disabled(!model.isRunning)
-                .help(model.gain.note ?? "Adjusts gain to hold the beam at the target peak.")
+            if isRemote {
+                // The servo runs where the camera is; from here it can only be reported.
+                LabeledContent("Auto-Gain Servo") {
+                    Text(model.remoteState.map { $0.autoGain ? "On" : "Off" } ?? "—")
+                }
+            } else {
+                Toggle("Auto-Gain Servo", isOn: $model.autoGainEnabled)
+                    .disabled(!model.isRunning)
+                    .help(model.gain.note ?? "Adjusts gain to hold the beam at the target peak.")
 
-            slider("Target Peak", value: $model.targetPeak, in: 0.30...0.90,
-                   readout: String(format: "%.0f%% FS", model.targetPeak * 100),
-                   help: "Peak signal level the auto-gain servo holds the beam to.")
+                slider("Target Peak", value: $model.targetPeak, in: 0.30...0.90,
+                       readout: String(format: "%.0f%% FS", model.targetPeak * 100),
+                       help: "Peak signal level the auto-gain servo holds the beam to.")
+            }
 
             if let advisory = model.advisory {
                 Label(advisory, systemImage: "arrow.up.arrow.down.circle")
@@ -274,34 +341,43 @@ struct SettingsSidebar: View {
                 .frame(width: 84)
                 .multilineTextAlignment(.trailing)
                 // Read-only while the bare-sensor pitch drives it, since anything typed here
-                // would be overwritten by the next frame.
-                .disabled(model.useBareSensorPitch)
+                // would be overwritten by the next frame — and from a publisher, by its own.
+                .disabled(model.useBareSensorPitch || isRemote)
             }
-            .help("Every reported size scales with this. Pitch is the sensor width divided "
+            .help(isRemote
+                  ? "The publisher's calibration, which every size shown here is in."
+                  : "Every reported size scales with this. Pitch is the sensor width divided "
                   + "by the streamed frame width, so a downscaled live view has a much "
                   + "coarser pitch than the sensor's native figure.")
 
-            sensorPresetNote
-
-            if let preset = model.detectedSensor, let pitch = model.detectedSensorPitch {
-                Button(String(format: "Use %@ Pitch (%.2f µm)", preset.displayName, pitch)) {
-                    model.settings.micronsPerPixel = pitch
-                }
-                .inlineLinkStyle()
-                .help("Set µm/pixel from the matched preset at the current frame width.")
+            if !isRemote {
+                localCalibrationRows
             }
-
-            // A checkbox rather than a button, because it is a standing choice about the
-            // optical setup: with the lens off the pitch follows the stream width, and a
-            // source that changes width mid-run has to carry the new pitch with it.
-            Toggle("Use Bare-Sensor Pitch", isOn: $model.useBareSensorPitch)
-                .disabled(model.streamedFrameWidth == nil)
-                .help(model.streamedFrameWidth == nil
-                      ? "Needs a frame: the pitch is 35600 µm divided by the streamed width."
-                      : "Hold µm/pixel at 35600 / current frame width, for a lens-free sensor.")
         } header: {
             Text("Calibration")
         }
+    }
+
+    @ViewBuilder
+    private var localCalibrationRows: some View {
+        sensorPresetNote
+
+        if let preset = model.detectedSensor, let pitch = model.detectedSensorPitch {
+            Button(String(format: "Use %@ Pitch (%.2f µm)", preset.displayName, pitch)) {
+                model.settings.micronsPerPixel = pitch
+            }
+            .inlineLinkStyle()
+            .help("Set µm/pixel from the matched preset at the current frame width.")
+        }
+
+        // A checkbox rather than a button, because it is a standing choice about the
+        // optical setup: with the lens off the pitch follows the stream width, and a
+        // source that changes width mid-run has to carry the new pitch with it.
+        Toggle("Use Bare-Sensor Pitch", isOn: $model.useBareSensorPitch)
+            .disabled(model.streamedFrameWidth == nil)
+            .help(model.streamedFrameWidth == nil
+                  ? "Needs a frame: the pitch is 35600 µm divided by the streamed width."
+                  : "Hold µm/pixel at 35600 / current frame width, for a lens-free sensor.")
     }
 
     /// Says where the number in the field came from — or that nothing matched, which is
@@ -371,22 +447,10 @@ struct SettingsSidebar: View {
         CollapsibleListSection(
             isExpanded: $model.expandedSettingsSections[contains: Panel.display.rawValue]
         ) {
-            // The picker itself stays text-only: a menu-style Picker flattens its rows to
-            // labels, so a swatch placed inside one is silently dropped. The ramp goes
-            // underneath instead, where it renders and is big enough to actually judge.
-            Picker("Colormap", selection: $model.colormap) {
-                ForEach(Colormap.allCases) { map in
-                    Text(map.rawValue).tag(map)
-                }
+            // A remote picture arrives already rendered, in the publisher's colours.
+            if !isRemote {
+                pictureRows
             }
-            .help(model.colormap.detail)
-            ColormapSwatch(colormap: model.colormap)
-
-            Toggle("Logarithmic Scale", isOn: $model.logarithmic)
-
-            slider("Display Gain", value: $model.displayGain, in: 1...50,
-                   readout: String(format: "%.1f×", model.displayGain),
-                   help: "Affects the picture only, never the measurement.")
 
             Toggle("X / Y Profiles", isOn: $model.showProfiles)
 
@@ -426,17 +490,76 @@ struct SettingsSidebar: View {
             .help("Digits shown for every measured value. "
                   + "Exports always carry full precision.")
 
-            Toggle("Fit Profiles", isOn: $model.settings.fitProfiles)
-                .help("Fits a Gaussian to each profile. Off skips the fit entirely; "
-                      + "the measured widths are moments and never use it.")
+            if !isRemote {
+                Toggle("Fit Profiles", isOn: $model.settings.fitProfiles)
+                    .help("Fits a Gaussian to each profile. Off skips the fit entirely; "
+                          + "the measured widths are moments and never use it.")
+            }
         } header: {
             Text("Display")
         }
     }
 
+    @ViewBuilder
+    private var pictureRows: some View {
+        // The picker itself stays text-only: a menu-style Picker flattens its rows to
+        // labels, so a swatch placed inside one is silently dropped. The ramp goes
+        // underneath instead, where it renders and is big enough to actually judge.
+        Picker("Colormap", selection: $model.colormap) {
+            ForEach(Colormap.allCases) { map in
+                Text(map.rawValue).tag(map)
+            }
+        }
+        .help(model.colormap.detail)
+        ColormapSwatch(colormap: model.colormap)
+
+        Toggle("Logarithmic Scale", isOn: $model.logarithmic)
+
+        slider("Display Gain", value: $model.displayGain, in: 1...50,
+               readout: String(format: "%.1f×", model.displayGain),
+               help: "Affects the picture only, never the measurement.")
+    }
+
+    // MARK: - Sharing
+
+    /// Publishing this window for other devices to watch. Off until asked for: it opens a
+    /// network listener, and a camera on a bench is not everybody's business by default.
+    private var sharingSection: some View {
+        CollapsibleListSection(
+            isExpanded: $model.expandedSettingsSections[contains: Panel.sharing.rawValue]
+        ) {
+            Toggle("Publish on Network", isOn: $model.publishing)
+                .help("Lets Profiler on a Vision Pro, an iPad or another Mac on this network "
+                      + "show this window's beam and measurements.")
+
+            LabeledContent("Passcode") {
+                SecureField("Optional", text: $model.publishPasscode)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 140)
+            }
+            .help("When set, viewers must enter it, and the link is encrypted. "
+                  + "One passcode for every window.")
+
+            if let error = model.publishError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let name = model.publishedName {
+                Text("Visible as “\(name)” · "
+                     + (model.viewerCount == 1 ? "1 viewer" : "\(model.viewerCount) viewers"))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("Sharing")
+        }
+    }
+
     // MARK: - Shared row shapes
 
-    #if os(iOS)
+    #if !os(macOS)
     private var fpsRow: some View {
         Text(String(
             format: "Capture %.1f · analysed %.1f fps",

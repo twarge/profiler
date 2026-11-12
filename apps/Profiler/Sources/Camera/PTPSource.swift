@@ -1,3 +1,6 @@
+// Left out of the visionOS build, which has no camera backends: it measures through a
+// publishing Mac (`RemoteSource`).
+#if !os(visionOS)
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -216,3 +219,4 @@ final class PTPSource: FrameSource {
         return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 }
+#endif

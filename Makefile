@@ -7,6 +7,8 @@
 #   make bench      per-stage timings for one frame
 #   make ios        optimised build for an iPad
 #   make ios-sim    build for the iOS Simulator
+#   make vision     optimised build for a Vision Pro
+#   make vision-sim build for the visionOS Simulator
 #   make icon       re-render the app icon
 #   make clean
 #
@@ -19,7 +21,7 @@
 # Concurrent makes are serialized behind Scripts/with-build-lock for the same
 # reason — two `make test` runs would otherwise race each other's codesign.
 
-.PHONY: all mac release test run bench ios ios-sim icon clean
+.PHONY: all mac release test run bench ios ios-sim vision vision-sim icon clean
 
 DERIVED = build/DerivedData
 XCB = xcodebuild -project apps/Profiler.xcodeproj -scheme Profiler \
@@ -67,6 +69,17 @@ ios-sim:
 	$(LOCK) $(XCB) -destination "generic/platform=iOS Simulator" \
 	  -allowProvisioningUpdates -quiet build
 	@echo "==> Built for iOS Simulator"
+
+# The Vision Pro build has no camera backends: it shows a publishing Mac's windows.
+vision:
+	$(LOCK) $(XCB) -destination "generic/platform=visionOS" -configuration Release \
+	  -allowProvisioningUpdates -quiet build
+	@echo "==> Built for visionOS (Release)"
+
+vision-sim:
+	$(LOCK) $(XCB) -destination "generic/platform=visionOS Simulator" \
+	  -allowProvisioningUpdates -quiet build
+	@echo "==> Built for visionOS Simulator"
 
 # Redraws the icon into the asset catalog. The PNGs are committed, so this is only
 # needed when the design in the script changes. Colormap.swift is compiled in rather

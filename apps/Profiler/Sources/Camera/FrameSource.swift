@@ -3,7 +3,7 @@ import CoreVideo
 import Foundation
 
 /// What the active source can tell us, and let us change, about sensor gain.
-struct GainState {
+struct GainState: Equatable, Codable {
     var canReadISO = false
     var canSetISO = false
     var currentISO: Int?

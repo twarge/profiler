@@ -59,10 +59,9 @@ struct BeamImageView: View {
         }
     }
 
-    private var currentImageSize: CGSize {
-        guard let image = model.displayImage else { return .zero }
-        return CGSize(width: image.width, height: image.height)
-    }
+    /// The pixel grid the overlays are drawn in, which from a remote publisher is its
+    /// analysed frame rather than the preview picture standing in for it.
+    private var currentImageSize: CGSize { model.beamPixelSize }
 
     /// Why the picture has stopped changing, over the picture itself: a frozen beam reads as
     /// a steady one, and the window's run state is a word in the title bar on the Mac and in

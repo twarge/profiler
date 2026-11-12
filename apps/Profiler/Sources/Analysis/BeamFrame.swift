@@ -47,7 +47,7 @@ enum MeasurementChannel: String, CaseIterable, Identifiable, Codable {
 }
 
 /// Rectangular integration aperture in pixel coordinates.
-struct Aperture: Equatable {
+struct Aperture: Equatable, Codable {
     var x0: Int
     var y0: Int
     var x1: Int

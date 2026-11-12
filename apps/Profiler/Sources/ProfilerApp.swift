@@ -31,7 +31,7 @@ private struct StatusBarToggle: View {
 }
 #endif
 
-#if os(iOS)
+#if !os(macOS)
 /// File › New Window, for a second camera's window. The Mac's menu has one of its own; the
 /// iPad's offers a SwiftUI app only Close. Not on an iPhone, which shows one window.
 private struct NewWindowButton: View {

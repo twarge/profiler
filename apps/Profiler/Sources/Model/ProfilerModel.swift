@@ -18,6 +18,7 @@ final class ProfilerModel {
         case ptp = "Sony PC Remote"
         case uvc = "USB Video"
         case synthetic = "Synthetic"
+        case remote = "Remote"
         var id: String { rawValue }
 
         var detail: String {
@@ -25,7 +26,18 @@ final class ProfilerModel {
             case .ptp: return "PTP live view with closed-loop ISO control."
             case .uvc: return "USB Streaming mode. Higher resolution, no ISO control."
             case .synthetic: return "Simulated beam with known ground truth."
+            case .remote: return "A camera window published by Profiler on another device."
             }
+        }
+
+        /// The backends this platform can run. A Vision Pro has no camera backends: it
+        /// shows a publishing Mac's measurements, or the simulator.
+        static var available: [SourceKind] {
+            #if os(visionOS)
+            [.remote, .synthetic]
+            #else
+            allCases
+            #endif
         }
     }
 
@@ -40,6 +52,7 @@ final class ProfilerModel {
             guard sourceKind != oldValue else { return }
             if !isApplyingProfile { letGoOfCameraTakenElsewhere() }
             switchToCurrentDeviceProfile()
+            updateBrowsing()
         }
     }
     var isRunning = false
@@ -98,6 +111,66 @@ final class ProfilerModel {
             if sourceKind == .uvc { switchToCurrentDeviceProfile() } else { scheduleSave() }
         }
     }
+    /// Profiler windows published on the local network, while the Remote backend is chosen.
+    private(set) var remotePublishers: [LabcastPeer] = []
+    /// The publisher this window shows, by its Bonjour name. Any number of windows may
+    /// watch one publisher, so unlike a camera it is never taken.
+    var selectedRemoteName: String? {
+        willSet {
+            guard newValue != selectedRemoteName,
+                  sourceKind == .remote, !isApplyingProfile else { return }
+            saveTask?.cancel()
+            persist()
+        }
+        didSet {
+            guard selectedRemoteName != oldValue else { return }
+            if sourceKind == .remote { switchToCurrentDeviceProfile() } else { scheduleSave() }
+        }
+    }
+    /// Passcode for publishers that ask for one. One for the app, like `publishPasscode`.
+    var remotePasscode = UserDefaults.standard.string(forKey: NetworkPreference.remotePasscode) ?? "" {
+        didSet {
+            guard remotePasscode != oldValue else { return }
+            UserDefaults.standard.set(remotePasscode, forKey: NetworkPreference.remotePasscode)
+            for other in Instruments.shared.others(than: self) where other.remotePasscode != remotePasscode {
+                other.remotePasscode = remotePasscode
+            }
+        }
+    }
+    /// What the publisher being watched last said about itself. Nil on a local source.
+    private(set) var remoteState: BeamRemoteState?
+
+    /// Publish this window's measurements on the local network. Off until the operator
+    /// turns it on, and remembered per camera.
+    var publishing = false {
+        didSet {
+            guard publishing != oldValue, !isApplyingProfile else { return }
+            syncPublisher()
+            scheduleSave()
+        }
+    }
+    /// When set, viewers must enter the same passcode, and the link is encrypted.
+    var publishPasscode = UserDefaults.standard.string(forKey: NetworkPreference.publishPasscode) ?? "" {
+        didSet {
+            guard publishPasscode != oldValue else { return }
+            UserDefaults.standard.set(publishPasscode, forKey: NetworkPreference.publishPasscode)
+            for other in Instruments.shared.others(than: self) where other.publishPasscode != publishPasscode {
+                other.publishPasscode = publishPasscode
+            }
+            // Not on every keystroke: each change takes the listener down and up again.
+            passcodeTask?.cancel()
+            passcodeTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(800))
+                guard !Task.isCancelled else { return }
+                self?.syncPublisher()
+            }
+        }
+    }
+    /// The name viewers see this window under while it is published.
+    private(set) var publishedName: String?
+    private(set) var publishError: String?
+    private(set) var viewerCount = 0
+
     /// Start capturing on launch using the remembered backend and camera. One setting for the
     /// app rather than per window, so a change in any window reaches the others.
     var autostart = true {
@@ -115,10 +188,11 @@ final class ProfilerModel {
             source?.measurementChannel = settings.channel
             if !useBareSensorPitch { manualMicronsPerPixel = settings.micronsPerPixel }
             scheduleSave()
+            publishState()
         }
     }
     var metrics = BeamMetrics()
-    var frozen = false { didSet { pipeline.isFrozen = frozen } }
+    var frozen = false { didSet { pipeline.isFrozen = frozen; publishState() } }
 
     /// Pitch comes from the streamed frame width rather than the entered value. Held here
     /// rather than in `AnalysisSettings` because the analyser only ever wants the resulting
@@ -188,6 +262,7 @@ final class ProfilerModel {
             gainController.reset()
             if !autoGainEnabled { advisory = nil }
             scheduleSave()
+            publishState()
         }
     }
     var targetPeak: Double = 0.70 {
@@ -254,6 +329,8 @@ final class ProfilerModel {
     /// Set once the window has settled what it measures (`open`). Until then the model holds
     /// no camera and saves nothing: its backend is a placeholder, not anybody's choice.
     private(set) var isOpen = false
+    /// The window has gone (`endSession`): nothing is published or browsed for any more.
+    private var isClosed = false
     /// Whether autostart resumes this window's camera: one that was measuring when the app
     /// last quit, or — with no record of that — the last one used. A window opened beside
     /// others only selects the next free camera, and a reopened one that was idle stays
@@ -261,6 +338,14 @@ final class ProfilerModel {
     /// autostart's to do.
     private var resumesRememberedCamera = false
     private let releaseObservers = ObserverTokens()
+
+    private var publisher: BeamPublisher?
+    /// The same publisher, where the live-view queue can reach it.
+    private let publisherTap = BeamPublisherTap()
+    private var publishedState: BeamRemoteState?
+    private var passcodeTask: Task<Void, Never>?
+    private var browseTask: Task<Void, Never>?
+    private var remoteImagesReceived = 0
 
     init() {
         pipeline.settings = settings
@@ -270,7 +355,9 @@ final class ProfilerModel {
         pipeline.onResult = { [weak self] frame, metrics in
             Task { @MainActor in self?.publish(frame: frame, metrics: metrics) }
         }
-        pipeline.onLiveView = { [weak self] image, profileX, profileY in
+        pipeline.onLiveView = { [weak self, publisherTap] image, profileX, profileY in
+            // Encoded here, on the live-view queue, and only while a viewer is watching.
+            if let image { publisherTap.publisher?.publish(image: image) }
             Task { @MainActor in
                 self?.publishLiveView(image: image, profileX: profileX, profileY: profileY)
             }
@@ -358,7 +445,8 @@ final class ProfilerModel {
     func open(restoring savedDeviceKey: String?) {
         guard !isOpen else { return }
         let state = store.appState
-        let lastKind = SourceKind(rawValue: state.sourceKind) ?? .synthetic
+        var lastKind = SourceKind(rawValue: state.sourceKind) ?? .synthetic
+        if !SourceKind.available.contains(lastKind) { lastKind = .synthetic }
 
         isApplyingProfile = true
         autostart = state.autostart
@@ -366,13 +454,14 @@ final class ProfilerModel {
         let launchWindow = savedDeviceKey == nil && isFirst
             ? Instruments.shared.claimLaunchWindow() : nil
         if let key = savedDeviceKey ?? launchWindow?.deviceKey,
-           let saved = Self.source(fromDeviceKey: key) {
+           let saved = Self.source(fromDeviceKey: key), SourceKind.available.contains(saved.kind) {
             // Back on the camera it had, and measuring again only if it was when the app quit.
             resumesRememberedCamera = Instruments.shared.wasRunningAtLastQuit(key)
             sourceKind = saved.kind
             switch saved.kind {
             case .ptp: selectedPTPCameraID = saved.id
             case .uvc: selectedUVCDeviceID = saved.id
+            case .remote: selectedRemoteName = saved.id
             case .synthetic: break
             }
         } else if isFirst {
@@ -380,8 +469,10 @@ final class ProfilerModel {
             sourceKind = lastKind
             selectedPTPCameraID = state.selectedPTPCameraID
             selectedUVCDeviceID = state.selectedUVCDeviceID
+            selectedRemoteName = state.selectedRemoteName
         } else {
             sourceKind = lastKind
+            selectedRemoteName = state.selectedRemoteName
             // This window's browser has not enumerated yet; the others' have.
             let attached = ptpCameras + Instruments.shared.others(than: self).flatMap(\.ptpCameras)
             selectedPTPCameraID = attached.first {
@@ -397,6 +488,7 @@ final class ProfilerModel {
         isOpen = true
         applyProfile(store.profile(for: currentDeviceKey))
         refreshUVCDevices()
+        updateBrowsing()
     }
 
     /// Trades a choice another window has since taken for the first camera still free. A
@@ -415,7 +507,7 @@ final class ProfilerModel {
             }?.id
         case .uvc:
             selectedUVCDeviceID = uvcDevices.first { !isTakenElsewhere(.uvc, id: $0.id) }?.id
-        case .synthetic:
+        case .synthetic, .remote:
             break
         }
     }
@@ -431,12 +523,17 @@ final class ProfilerModel {
         persist(includingAppState: false)
         await stop()
         Instruments.shared.leave(self)
+        isClosed = true
+        syncPublisher()
+        updateBrowsing()
     }
 
     /// The camera this window has taken, which no other window may open: its choice on a
-    /// real backend, once it is open. A synthetic beam is nobody's to take.
+    /// real backend, once it is open. A synthetic beam is nobody's to take, and a remote
+    /// publisher is everybody's to watch.
     var heldDeviceKey: String? {
-        guard isOpen, sourceKind != .synthetic, selectedDeviceID != nil else { return nil }
+        guard isOpen, sourceKind == .ptp || sourceKind == .uvc, selectedDeviceID != nil
+        else { return nil }
         return currentDeviceKey
     }
 
@@ -474,6 +571,7 @@ final class ProfilerModel {
         case .synthetic: return nil
         case .ptp: return selectedPTPCameraID
         case .uvc: return selectedUVCDeviceID
+        case .remote: return selectedRemoteName
         }
     }
 
@@ -482,6 +580,7 @@ final class ProfilerModel {
         case .synthetic: return "synthetic"
         case .ptp: return "ptp/" + (id ?? "unassigned")
         case .uvc: return "uvc/" + (id ?? "unassigned")
+        case .remote: return "remote/" + (id ?? "unassigned")
         }
     }
 
@@ -495,6 +594,7 @@ final class ProfilerModel {
         switch parts[0] {
         case "ptp": return (.ptp, id)
         case "uvc": return (.uvc, id)
+        case "remote": return (.remote, id)
         default: return nil
         }
     }
@@ -508,6 +608,8 @@ final class ProfilerModel {
             return ptpCameras.first { $0.id == selectedPTPCameraID }?.name ?? "No camera"
         case .uvc:
             return uvcDevices.first { $0.id == selectedUVCDeviceID }?.name ?? "No video device"
+        case .remote:
+            return selectedRemoteName ?? "No publisher"
         }
     }
 
@@ -518,13 +620,16 @@ final class ProfilerModel {
             return ptpCameras.first { $0.id == selectedPTPCameraID }?.name ?? "Sony camera"
         case .uvc:
             return uvcDevices.first { $0.id == selectedUVCDeviceID }?.name ?? "USB video device"
+        case .remote:
+            return selectedRemoteName ?? "Remote publisher"
         }
     }
 
     /// Sensor preset matching the attached camera, if the library knows it. Synthetic frames
-    /// have no physical sensor, so they deliberately match nothing.
+    /// have no physical sensor, so they deliberately match nothing; a remote camera's
+    /// calibration is its publisher's business.
     var detectedSensor: SensorPreset? {
-        guard sourceKind != .synthetic else { return nil }
+        guard sourceKind == .ptp || sourceKind == .uvc else { return nil }
         return SensorLibrary.preset(forDeviceName: currentDeviceName)
     }
 
@@ -584,9 +689,13 @@ final class ProfilerModel {
         // applies it through `publish`.
         if useBareSensorPitch { applyBareSensorPitch() }
 
+        publishing = p.publishOnNetwork
+
         if profile == nil {
             status = "New device — using default settings."
         }
+        // The camera, and with it the published name, may have changed with the profile.
+        syncPublisher()
     }
 
     private func scheduleSave() {
@@ -630,6 +739,7 @@ final class ProfilerModel {
         profile.profileChartFraction = profileChartFraction
         profile.expandedSettingsSections = expandedSettingsSections.sorted()
         profile.expandedMetricSections = expandedMetricSections.sorted()
+        profile.publishOnNetwork = publishing
         store.save(profile, for: currentDeviceKey)
 
         guard includingAppState else { return }
@@ -637,6 +747,7 @@ final class ProfilerModel {
         state.sourceKind = sourceKind.rawValue
         state.selectedPTPCameraID = selectedPTPCameraID
         state.selectedUVCDeviceID = selectedUVCDeviceID
+        state.selectedRemoteName = selectedRemoteName
         state.autostart = autostart
         store.appState = state
     }
@@ -653,6 +764,10 @@ final class ProfilerModel {
         switch sourceKind {
         case .synthetic:
             await start()
+
+        case .remote:
+            // No waiting for it to show up in the browser: the link keeps trying by itself.
+            if selectedRemoteName != nil { await start() }
 
         case .uvc:
             refreshUVCDevices()
@@ -727,6 +842,19 @@ final class ProfilerModel {
             let synthetic = SyntheticSource()
             syntheticTruth = synthetic.truth
             newSource = synthetic
+        case .remote:
+            guard let name = selectedRemoteName else {
+                errorMessage = "Choose a publisher first."
+                status = "Failed to start."
+                return
+            }
+            let remote = RemoteSource(publisherNamed: name, passcode: remotePasscode)
+            watch(remote)
+            remoteState = nil
+            syntheticTruth = nil
+            // Nothing local is being analysed, so nothing local is left to export or rescale.
+            lastFrame = nil
+            newSource = remote
         }
 
         newSource.measurementChannel = settings.channel
@@ -762,6 +890,7 @@ final class ProfilerModel {
             isRunning = false
             source = nil
         }
+        syncPublisher()
     }
 
     private func stopSource() async {
@@ -775,6 +904,8 @@ final class ProfilerModel {
         captureFPS = 0
         frameTimestamps.removeAll()
         captureRateMark = nil
+        remoteImagesReceived = 0
+        publishState()
     }
 
     private func sourceInterrupted(_ report: SourceInterruption?) async {
@@ -789,6 +920,7 @@ final class ProfilerModel {
             await stop()
             interruption = reason
         }
+        publishState()
     }
 
     func beginPTPDiscovery() {
@@ -810,7 +942,7 @@ final class ProfilerModel {
     private func claimCamera() throws {
         let attached: [(id: String, name: String, usable: Bool)]
         switch sourceKind {
-        case .synthetic:
+        case .synthetic, .remote:
             return
         case .ptp:
             attached = ptpCameras.map { ($0.id, $0.name, $0.acceptsPTP) }
@@ -831,7 +963,7 @@ final class ProfilerModel {
         switch sourceKind {
         case .ptp: selectedPTPCameraID = free.id
         case .uvc: selectedUVCDeviceID = free.id
-        case .synthetic: break
+        case .synthetic, .remote: break
         }
     }
 
@@ -873,6 +1005,9 @@ final class ProfilerModel {
             micronsPerPixel: settings.micronsPerPixel
         )
         markAnalysed()
+        // State first, so a viewer has the scale these numbers are in before the numbers.
+        publishState()
+        publisher?.publish(metrics: metrics)
 
         Task { await self.runGainServo(metrics: metrics) }
     }
@@ -919,15 +1054,17 @@ final class ProfilerModel {
     private func updateCaptureCounters() {
         let now = Date()
         let counters = pipeline.counters
-        droppedFrames = counters.dropped
+        // From a publisher, what arrives is its pictures; frames it skipped are its own count.
+        let received = sourceKind == .remote ? remoteImagesReceived : counters.received
+        droppedFrames = sourceKind == .remote ? 0 : counters.dropped
         if let (mark, count) = captureRateMark {
             let span = now.timeIntervalSince(mark)
             if span >= 1.0 {
-                captureFPS = Double(counters.received - count) / span
-                captureRateMark = (now, counters.received)
+                captureFPS = Double(received - count) / span
+                captureRateMark = (now, received)
             }
         } else {
-            captureRateMark = (now, counters.received)
+            captureRateMark = (now, received)
         }
     }
 
@@ -936,6 +1073,7 @@ final class ProfilerModel {
     func refreshGainState() async {
         guard let source else { return }
         gain = await source.gainState()
+        publishState()
     }
 
     private func runGainServo(metrics: BeamMetrics) async {
@@ -975,6 +1113,214 @@ final class ProfilerModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    // MARK: - Publishing
+
+    /// Brings the publisher into line with what this window should be publishing: nothing,
+    /// unless the operator has turned it on for a window with a source of its own. Called
+    /// whenever any of that may have changed; does nothing when it has not.
+    private func syncPublisher() {
+        let name = isOpen && !isClosed && publishing && sourceKind != .remote
+            ? Self.serviceName(for: currentDeviceName) : nil
+        if let publisher, publisher.name == name, publishedPasscode == publishPasscode {
+            publishState()
+            return
+        }
+        if publisher == nil, name == nil { return }
+        publisher?.stop()
+        publisher = nil
+        publisherTap.publisher = nil
+        publishedState = nil
+        publishedName = nil
+        publishError = nil
+        viewerCount = 0
+        guard let name else { return }
+
+        let next = BeamPublisher(name: name, passcode: publishPasscode)
+        publishedPasscode = publishPasscode
+        next.onSetISO = { [weak self] iso in
+            guard let self else { throw LabcastError.remote("That window has closed.") }
+            try await self.setISO(fromViewer: iso)
+        }
+        next.onViewersChanged { [weak self, weak next] count in
+            Task { @MainActor in
+                guard let self, let next, self.publisher === next else { return }
+                self.viewerCount = count
+            }
+        }
+        publisher = next
+        publisherTap.publisher = next
+        publishedName = name
+        publishState()
+        Task { [weak self] in
+            do {
+                try await next.start()
+            } catch {
+                guard let self, self.publisher === next else { return }
+                if case let LabcastError.listenerFailed(reason) = error {
+                    self.publishError = "Could not publish: \(reason)"
+                } else {
+                    self.publishError = "Could not publish: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Passcode the running publisher was started with.
+    private var publishedPasscode = ""
+
+    /// The computer's name, then the camera's: a Mac with two cameras publishes two windows,
+    /// and a viewer has to be able to tell them apart. Bonjour allows a name 63 bytes.
+    private static func serviceName(for source: String) -> String {
+        #if os(macOS)
+        let host = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        #else
+        let host = UIDevice.current.name
+        #endif
+        var name = "\(host) – \(source)"
+        while name.utf8.count > 63 { name.removeLast() }
+        return name
+    }
+
+    /// Sends the retained state, when a publisher is up and the state has changed.
+    private func publishState() {
+        guard let publisher else { return }
+        let state = BeamRemoteState(
+            sourceName: currentDeviceName,
+            sourceKind: sourceKind.rawValue,
+            isRunning: isRunning,
+            isPaused: frozen,
+            interruption: interruption,
+            micronsPerPixel: settings.micronsPerPixel,
+            channel: settings.channel,
+            frameWidth: lastFrame?.width ?? 0,
+            frameHeight: lastFrame?.height ?? 0,
+            gain: gain,
+            autoGain: autoGainEnabled
+        )
+        guard state != publishedState else { return }
+        publishedState = state
+        publisher.publish(state: state)
+    }
+
+    /// A viewer's ISO request. Refused wherever this window's own ISO picker would be
+    /// disabled, with the reason sent back to the viewer.
+    private func setISO(fromViewer value: Int) async throws {
+        guard let source, isRunning else {
+            throw LabcastError.remote("The camera is not capturing.")
+        }
+        guard gain.canSetISO else {
+            throw LabcastError.remote("This camera's ISO cannot be set from the app.")
+        }
+        guard !autoGainEnabled else {
+            throw LabcastError.remote("The auto-gain servo is on at the publisher, and sets the ISO itself.")
+        }
+        try await source.setISO(value)
+        status = "A viewer set ISO \(value)."
+        await refreshGainState()
+    }
+
+    // MARK: - Remote source
+
+    /// The size, in pixels, that the metrics' coordinates refer to: the picture's own on a
+    /// local source, the publisher's analysed frame on a remote one, whose preview picture
+    /// may have been scaled down.
+    var beamPixelSize: CGSize {
+        if sourceKind == .remote, let remoteState,
+           remoteState.frameWidth > 0, remoteState.frameHeight > 0 {
+            return CGSize(width: remoteState.frameWidth, height: remoteState.frameHeight)
+        }
+        guard let image = displayImage else { return .zero }
+        return CGSize(width: image.width, height: image.height)
+    }
+
+    /// Whether the ISO is somebody else's to set just now: the servo's — here, or at the
+    /// publisher being watched.
+    var isoIsServoDriven: Bool {
+        sourceKind == .remote ? remoteState?.autoGain ?? false : autoGainEnabled
+    }
+
+    /// Browses for publishers only while the Remote backend is chosen: looking is what
+    /// makes the system ask for local-network access, which a camera window never needs.
+    private func updateBrowsing() {
+        let wanted = isOpen && !isClosed && sourceKind == .remote
+        guard wanted != (browseTask != nil) else { return }
+        browseTask?.cancel()
+        browseTask = nil
+        guard wanted else {
+            remotePublishers = []
+            return
+        }
+        browseTask = Task { [weak self] in
+            for await found in LabcastBrowser.peers(appID: BeamWire.appID) {
+                guard let self, !Task.isCancelled else { return }
+                self.remotePublishers = found
+                if self.selectedRemoteName == nil, !self.isRunning {
+                    self.selectedRemoteName = found.first?.name
+                }
+            }
+        }
+    }
+
+    /// Whether the publisher chosen asks for a passcode, as far as browsing can tell.
+    var remoteNeedsPasscode: Bool {
+        remotePublishers.first { $0.name == selectedRemoteName }?.requiresPasscode ?? false
+    }
+
+    /// Routes a remote source's values to where the pipeline's would go. The seam is here
+    /// rather than at `onFrame` because nothing is analysed on this side: the publisher's
+    /// metrics, profiles and picture are shown as received.
+    private func watch(_ remote: RemoteSource) {
+        remote.onState = { [weak self, weak remote] state in
+            Task { @MainActor in
+                guard let self, let remote, self.source === remote else { return }
+                self.receive(state)
+            }
+        }
+        remote.onMeasurement = { [weak self, weak remote] metrics in
+            Task { @MainActor in
+                guard let self, let remote, self.source === remote else { return }
+                self.receive(metrics)
+            }
+        }
+        remote.onImage = { [weak self, weak remote] image in
+            Task { @MainActor in
+                guard let self, let remote, self.source === remote, !self.frozen else { return }
+                self.displayImage = image
+                self.remoteImagesReceived += 1
+                self.updateCaptureCounters()
+            }
+        }
+    }
+
+    private func receive(_ state: BeamRemoteState) {
+        remoteState = state
+        gain = state.gain
+        // The publisher's scale and channel are the ones its numbers are in. Shown, not
+        // saved: they are not this window's settings to remember.
+        if settings.micronsPerPixel != state.micronsPerPixel || settings.channel != state.channel {
+            let wasApplying = isApplyingProfile
+            isApplyingProfile = true
+            settings.micronsPerPixel = state.micronsPerPixel
+            settings.channel = state.channel
+            isApplyingProfile = wasApplying
+        }
+    }
+
+    private func receive(_ metrics: BeamMetrics) {
+        guard !frozen else { return }
+        self.metrics = metrics
+        // The charts draw the live lane's profiles; from a publisher those are the measured
+        // ones, which arrive with the metrics they belong to.
+        liveProfileX = metrics.profileX
+        liveProfileY = metrics.profileY
+        timeSeries.record(
+            metrics: metrics,
+            gain: gain,
+            micronsPerPixel: settings.micronsPerPixel
+        )
+        markAnalysed()
     }
 
     // MARK: - Dark frame
@@ -1044,4 +1390,10 @@ final class ProfilerModel {
             timestamp: Date()
         )
     }
+}
+
+/// App-wide network settings, in UserDefaults beside the rest of the app's state.
+enum NetworkPreference {
+    static let publishPasscode = "labcast.publishPasscode.v1"
+    static let remotePasscode = "labcast.remotePasscode.v1"
 }

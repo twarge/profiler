@@ -10,6 +10,12 @@
 	<true/>
 	<key>com.apple.security.device.camera</key>
 	<true/>
+	<!-- Publishing a camera window on the local network listens for viewers; the Remote
+	     backend connects to another device's publisher. -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
 	<!-- Export writes a PNG, a CSV and a JSON to a location the operator picks. -->
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>

@@ -1,3 +1,6 @@
+// Left out of the visionOS build, which has no camera backends: it measures through a
+// publishing Mac (`RemoteSource`).
+#if !os(visionOS)
 import Foundation
 import ImageCaptureCore
 
@@ -273,3 +276,4 @@ extension PTPTransport: ICCameraDeviceDelegate {
         error: Error?
     ) {}
 }
+#endif

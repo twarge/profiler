@@ -145,9 +145,8 @@ struct ContentView: View {
                 .toolbarBackground(.hidden, for: .navigationBar)
                 #endif
                 .toolbar { toolbarContent }
-                .inspector(isPresented: inspectorPresented) {
+                .readoutColumn(isPresented: inspectorPresented) {
                     MetricsInspector(model: model)
-                        .inspectorColumnWidth(min: 210, ideal: 280, max: 480)
                 }
                 #if os(iOS)
                 // In compact widths the readout is a real sheet, not the inspector's own
@@ -252,6 +251,32 @@ struct ContentView: View {
             }
             .help("Show or hide the measurement readout")
         }
+    }
+}
+
+private extension View {
+    /// The measurement readout as a trailing column: the system inspector where there is
+    /// one. visionOS has none, so there the column is laid out beside the instrument.
+    @ViewBuilder
+    func readoutColumn<Readout: View>(
+        isPresented: Binding<Bool>,
+        @ViewBuilder readout: () -> Readout
+    ) -> some View {
+        #if os(visionOS)
+        HStack(spacing: 0) {
+            self
+            if isPresented.wrappedValue {
+                Divider()
+                readout()
+                    .frame(width: 300)
+            }
+        }
+        #else
+        inspector(isPresented: isPresented) {
+            readout()
+                .inspectorColumnWidth(min: 210, ideal: 280, max: 480)
+        }
+        #endif
     }
 }
 

@@ -30,6 +30,16 @@
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>Profiler opens a session with the attached camera. macOS treats the camera's memory card as a removable volume; the app reads live-view frames only and does not read or modify files on the card.</string>
 
+	<!-- Publishing a camera window to, or watching one from, another device running
+	     Profiler: a Labcast listener and its Bonjour advertisement. Asked for only once
+	     the operator turns publishing on or chooses the Remote backend. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Profiler uses the local network to publish a camera window's beam measurements to, or show them from, Profiler on another device.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_labcast._tcp</string>
+	</array>
+
 	<!-- Scene lifecycle: one window per camera, on the iPad as on the Mac. Each scene is an
 	     instrument of its own, and closing one lets its camera go. -->
 	<key>UIApplicationSceneManifest</key>

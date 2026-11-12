@@ -1,3 +1,6 @@
+// Left out of the visionOS build, which has no camera backends: it measures through a
+// publishing Mac (`RemoteSource`).
+#if !os(visionOS)
 import Foundation
 
 // PTP wire constants. Operation and property codes in the 0x9xxx / 0xDxxx vendor ranges are
@@ -189,3 +192,4 @@ enum PTPCommand {
         return (code, params)
     }
 }
+#endif

@@ -22,7 +22,7 @@ struct AnalysisSettings {
     var channel: MeasurementChannel = .green
 }
 
-struct BeamMetrics {
+struct BeamMetrics: Equatable {
     // Position and size, in pixels. Convert with `micronsPerPixel`.
     var centroidX: Double = 0
     var centroidY: Double = 0

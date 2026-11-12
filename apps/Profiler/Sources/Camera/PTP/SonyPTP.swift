@@ -1,3 +1,6 @@
+// Left out of the visionOS build, which has no camera backends: it measures through a
+// publishing Mac (`RemoteSource`).
+#if !os(visionOS)
 import Foundation
 
 /// Sony PC Remote session: handshake, property table, live-view frames, ISO control.
@@ -248,3 +251,4 @@ final class SonySession {
         return data.subdata(in: s..<(e + 1))
     }
 }
+#endif
