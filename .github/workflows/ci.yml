@@ -72,7 +72,6 @@ jobs:
             -scheme Profiler \
             -configuration Debug \
             -destination 'platform=macOS' \
-            -derivedDataPath build/DerivedData \
             CODE_SIGN_IDENTITY=- \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM= \
@@ -80,4 +79,7 @@ jobs:
 
       - name: Run the self-test
         run: |
-          build/DerivedData/Build/Products/Debug/Profiler.app/Contents/MacOS/Profiler --self-test
+          products=$(xcodebuild -project apps/Profiler.xcodeproj -scheme Profiler \
+            -configuration Debug -destination 'platform=macOS' -showBuildSettings 2>/dev/null |
+            awk -F' = ' '/ BUILT_PRODUCTS_DIR = /{print $2; exit}')
+          "$products/Profiler.app/Contents/MacOS/Profiler" --self-test

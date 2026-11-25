@@ -12,20 +12,17 @@
 #   make icon       re-render the app icon
 #   make clean
 #
-# make builds into its own DerivedData (build/DerivedData), deliberately not
-# Xcode's: two build systems writing one Products directory is a race. Xcode
-# relinks a dylib inside the .app while make's build is still signing the
-# bundle, and CodeSign fails with a nonzero exit. The price is one extra full
-# compile the first time; after that both stay incremental in their own trees.
+# make is exactly Xcode's own Build: the same scheme, the same build settings,
+# the same default DerivedData, so a make build and a ⌘B are one incremental
+# build. Do not run both at once: two builds writing one Products directory
+# race each other's codesign.
 #
 # Concurrent makes are serialized behind Scripts/with-build-lock for the same
 # reason — two `make test` runs would otherwise race each other's codesign.
 
 .PHONY: all mac release test run bench ios ios-sim vision vision-sim icon clean
 
-DERIVED = build/DerivedData
-XCB = xcodebuild -project apps/Profiler.xcodeproj -scheme Profiler \
-  -derivedDataPath $(DERIVED)
+XCB = xcodebuild -project apps/Profiler.xcodeproj -scheme Profiler
 LOCK = Scripts/with-build-lock
 
 BUILT = $(XCB) -showBuildSettings
@@ -94,9 +91,11 @@ icon:
 	  apps/Profiler/Sources/Analysis/BeamFrame.swift
 	@$(LOCK) build/make-app-icon
 
-# Everything make produces lives under build/, so this is the whole clean.
-# Xcode's own DerivedData is Xcode's to manage.
+# Xcode's Clean Build Folder for both configurations, plus the icon generator
+# in build/.
 clean:
+	$(LOCK) $(XCB) -configuration Debug -quiet clean
+	$(LOCK) $(XCB) -configuration Release -quiet clean
 	rm -rf build
 
 # Where a frame's time goes, stage by stage. Release for the same reason `run` is —

@@ -34,11 +34,11 @@ make icon     # re-render the app icon
 make clean
 ```
 
-`make` builds the same scheme Xcode does, but into its own DerivedData
-(`build/DerivedData`), so a `make` and a ⌘B can never race each other's codesign — two
-build systems writing one Products directory is how "Command CodeSign failed" happens.
-Concurrent `make` invocations serialize behind a lock for the same reason; a second one
-waits rather than colliding.
+`make` is exactly Xcode's own Build: the same scheme, the same build settings and the
+same default DerivedData, so a `make` and a ⌘B share one incremental build. Don't run
+both at once — two builds writing one Products directory is how "Command CodeSign
+failed" happens. Concurrent `make` invocations serialize behind a lock for the same
+reason; a second one waits rather than colliding.
 
 One target builds every platform: macOS 14, iPadOS 17 and visionOS 1. The measurement
 core, the PTP stack and the UI are shared; only the window chrome and the camera lifecycle
